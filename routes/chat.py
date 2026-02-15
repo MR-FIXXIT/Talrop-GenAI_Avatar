@@ -1,57 +1,55 @@
+# routes/chat.py
+from typing import List, Literal
+
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from db import get_db
 from auth import require_tenant
-from pinecone_client import get_index
+
+from rag.chat_rag import (
+    build_llm,
+    history_to_lc,
+    contextualize_question,
+    retrieve_context,
+    build_effective_system_prompt,
+    generate_answer,
+    strip_think,
+)
 
 router = APIRouter(tags=["chat"])
+
+
+class ChatMsg(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(..., min_length=1)
+    chat_history: List[ChatMsg] = Field(default_factory=list)
+    top_k: int = 5
+
 
 def require_scope(ctx: dict, needed: str):
     scopes = ctx.get("scopes") or []
     if needed not in scopes:
         raise HTTPException(status_code=403, detail=f"Missing scope: {needed}")
 
+
 @router.post("/chat")
-def chat(payload: dict, ctx=Depends(require_tenant), db: Session = Depends(get_db)):
+def chat(payload: ChatRequest, ctx=Depends(require_tenant), db: Session = Depends(get_db)):
     require_scope(ctx, "chat")
     org_id = str(ctx["org_id"])
 
-    user_message = (payload.get("message") or "").strip()
+    user_message = payload.message.strip()
     if not user_message:
         raise HTTPException(status_code=400, detail="message is required")
 
-    index = get_index()
-    results = index.search(
-        namespace=org_id,
-        query={"inputs": {"text": user_message}, "top_k": 5},
-        fields=["document_id", "chunk_index", "filename"],
-    )
-
-    hits = results["result"]["hits"]
-    match_ids = [h["_id"] for h in hits]
-
-    if not match_ids:
-        context = ""
-    else:
-        placeholders = ", ".join([f":id{i}" for i in range(len(match_ids))])
-        params = {"org_id": org_id, **{f"id{i}": match_ids[i] for i in range(len(match_ids))}}
-
-        rows = db.execute(
-            text(f"""
-                SELECT id, content
-                FROM chunks
-                WHERE org_id = CAST(:org_id AS uuid)
-                AND id IN ({placeholders})
-            """),
-            params,
-        ).mappings().all()
-
-        # IMPORTANT: normalize DB UUID -> string so it matches Pinecone ids
-        content_by_id = {str(r["id"]): r["content"] for r in rows}
-        context = "\n\n---\n\n".join(content_by_id[i] for i in match_ids if i in content_by_id)
-
+    # DB-only: settings lookup stays in route layer
     settings = db.execute(
         text("""
             SELECT tone, system_prompt, safety_prompt, avatar_id, voice_id
@@ -62,12 +60,44 @@ def chat(payload: dict, ctx=Depends(require_tenant), db: Session = Depends(get_d
         {"org_id": org_id},
     ).mappings().first()
 
+    # RAG-only:
+    llm = build_llm(temperature=0.7, max_new_tokens=512)
+
+    lc_history = history_to_lc([m.model_dump() for m in payload.chat_history])
+
+    standalone_question = contextualize_question(
+        llm,
+        user_message=user_message,
+        lc_history=lc_history,
+    )
+
+    context, match_ids = retrieve_context(
+        db,
+        org_id=org_id,
+        question=standalone_question,
+        top_k=payload.top_k,
+    )
+
+    system_prompt = build_effective_system_prompt(
+        org_system_prompt=(settings["system_prompt"] if settings else None),
+    )
+
+    answer = generate_answer(
+        llm,
+        system_prompt=system_prompt,
+        user_message=user_message,
+        lc_history=lc_history,
+        context=context,
+    )
+    answer = strip_think(answer)
+
     return {
         "org_id": org_id,
+        "question_used_for_retrieval": standalone_question,
         "retrieved_chunks": len(match_ids),
+        "match_ids": match_ids,
         "avatar_settings_found": bool(settings),
-        "system_prompt": settings["system_prompt"] if settings else None,
         "tone": settings["tone"] if settings else None,
+        "answer": answer,
         "context_preview": context[:1200],
-        "user_message": user_message,
     }
