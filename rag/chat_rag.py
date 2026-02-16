@@ -16,14 +16,17 @@ from langchain_core.output_parsers import StrOutputParser
 from pinecone_client import get_index
 
 
-QA_SYSTEM_PROMPT = """You are an educational assistant and patient teacher.
-Explain concepts thoroughly and break down complex ideas into simpler parts.
-Use examples and analogies when helpful.
-Use only the following pieces of retrieved context to answer the question.
-If the answer is not contained within the retrieved context, say you don't know.
+QA_SYSTEM_PROMPT = """You must answer using ONLY the provided Context.
+Do NOT use outside knowledge. Do NOT guess.
+
+Rules:
+- If the answer is not explicitly stated in Context, reply exactly: I don't know.
+- If Context is empty, reply exactly: I don't know.
+- Keep the answer concise and directly relevant to the question.
 
 Context:
-{context}"""
+{context}
+"""
 
 CONTEXTUALIZE_Q_SYSTEM_PROMPT = """Given a chat history and the latest user question
 which might reference context in the chat history, formulate a standalone question
@@ -35,7 +38,7 @@ Role = Literal["user", "assistant"]
 HistoryItem = Dict[str, str]  # {"role": "...", "content": "..."}
 
 
-def build_llm(*, temperature: float = 0.7, max_new_tokens: int = 512) -> ChatHuggingFace:
+def build_llm(*, temperature: float = 0.5, max_new_tokens: int = 512) -> ChatHuggingFace:
     endpoint = HuggingFaceEndpoint(
         repo_id="HuggingFaceTB/SmolLM3-3B",
         temperature=temperature,
