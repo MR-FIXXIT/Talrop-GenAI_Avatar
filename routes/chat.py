@@ -61,7 +61,7 @@ def chat(payload: ChatRequest, ctx=Depends(require_tenant), db: Session = Depend
     ).mappings().first()
 
     # RAG-only:
-    llm = build_llm(temperature=0.7, max_new_tokens=512)
+    llm = build_llm(temperature=0.0, max_new_tokens=512)
 
     lc_history = history_to_lc([m.model_dump() for m in payload.chat_history])
 

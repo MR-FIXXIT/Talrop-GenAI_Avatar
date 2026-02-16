@@ -13,6 +13,10 @@ from sqlalchemy import text
 
 from pinecone_client import get_index
 
+# Core LangChain semantic chunking imports
+from langchain_experimental.text_splitter import SemanticChunker
+from langchain_huggingface import HuggingFaceEmbeddings
+
 
 @dataclass
 class UploadResult:
@@ -23,31 +27,32 @@ class UploadResult:
     content_type: Optional[str]
 
 
-def split_text(text: str, chunk_size: int = 800, overlap: int = 120) -> list[str]:
-    """
-    Simple splitter:
-    - takes chunk_size characters
-    - overlaps by overlap characters
-    """
+def semantic_chunk_text(
+    text: str,
+    *,
+    model_name: str,
+    min_chunk_size: int,
+    buffer_size: int = 1,
+    breakpoint_threshold_type: str = "percentile",
+    breakpoint_threshold_amount: float = 95.0,
+) -> list[str]:
     text = text.replace("\r\n", "\n").strip()
     if not text:
         return []
 
-    chunks = []
-    start = 0
-    n = len(text)
+    embeddings = HuggingFaceEmbeddings(model_name=model_name)
 
-    while start < n:
-        end = min(start + chunk_size, n)
-        chunk = text[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-        if end == n:
-            break
-        start = max(end - overlap, 0)
+    splitter = SemanticChunker(
+        embeddings=embeddings,
+        buffer_size=buffer_size,
+        breakpoint_threshold_type=breakpoint_threshold_type,
+        breakpoint_threshold_amount=breakpoint_threshold_amount,
+        min_chunk_size=min_chunk_size,
+    )
 
-    return chunks
-    
+    # SemanticChunker returns Documents via create_documents; take page_content
+    docs = splitter.create_documents([text])
+    return [d.page_content.strip() for d in docs if d.page_content and d.page_content.strip()]
 
 
 def ingest_and_index_text_file(
@@ -56,14 +61,12 @@ def ingest_and_index_text_file(
     org_id: str,
     file: UploadFile,
     upload_dir: Path,
-    chunk_size: int = 800,
-    overlap: int = 120,
 ) -> UploadResult:
     # ---- validate / read ----
     if not file.content_type or not file.content_type.startswith("text/"):
         raise HTTPException(status_code=400, detail="Only text/* files supported for now")
 
-    raw = file.file.read()  # route can also pass raw bytes if you prefer
+    raw = file.file.read()
     text_content = raw.decode("utf-8", errors="ignore").strip()
     if not text_content:
         raise HTTPException(status_code=400, detail="File has no readable text")
@@ -99,8 +102,15 @@ def ingest_and_index_text_file(
         },
     )
 
-    # ---- chunk ----
-    chunks = split_text(text_content, chunk_size=chunk_size, overlap=overlap)
+    # ---- LangChain semantic chunk ----
+    chunks = semantic_chunk_text(
+        text_content,
+        min_chunk_size=200,
+        buffer_size=1,
+        breakpoint_threshold_type="percentile",
+        breakpoint_threshold_amount=95.0,
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
 
     # ---- insert chunks + build pinecone records with SAME chunk_id ----
     index = get_index()
@@ -146,10 +156,7 @@ def ingest_and_index_text_file(
             "filename": safe_name,
         })
 
-    # Commit DB first (source of truth)
     db.commit()
-
-    # Then index in Pinecone
     index.upsert_records(namespace=org_id, records=records)
 
     return UploadResult(

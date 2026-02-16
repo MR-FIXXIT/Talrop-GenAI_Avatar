@@ -38,7 +38,7 @@ Role = Literal["user", "assistant"]
 HistoryItem = Dict[str, str]  # {"role": "...", "content": "..."}
 
 
-def build_llm(*, temperature: float = 0.5, max_new_tokens: int = 512) -> ChatHuggingFace:
+def build_llm(*, temperature: float, max_new_tokens: int = 512) -> ChatHuggingFace:
     endpoint = HuggingFaceEndpoint(
         repo_id="HuggingFaceTB/SmolLM3-3B",
         temperature=temperature,
@@ -91,6 +91,7 @@ def retrieve_context(
     org_id: str,
     question: str,
     top_k: int = 5,
+    min_score: float = 0.3
 ) -> tuple[str, List[str]]:
     """
     Pinecone search (namespace=org_id) -> chunk ids -> fetch content from Postgres -> context string.
@@ -104,6 +105,13 @@ def retrieve_context(
     )
 
     hits = results["result"]["hits"]
+    if hits:
+        print("PINECONE HIT[0]:", hits[0])
+
+    if float(hits[0].get("_score", 0.0)) < min_score:
+        return ("", [])
+
+
     match_ids = [h["_id"] for h in hits]
 
     if not match_ids:
@@ -145,6 +153,10 @@ def generate_answer(
     lc_history: List[Tuple[str, str]],
     context: str,
 ) -> str:
+    
+    if not context or not context.strip():
+        return "I don't know."
+    
     qa_prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         MessagesPlaceholder("chat_history"),

@@ -31,9 +31,7 @@ async def upload_document(
         db=db,
         org_id=org_id,
         file=file,
-        upload_dir=UPLOAD_DIR,
-        chunk_size=800,
-        overlap=120,
+        upload_dir=UPLOAD_DIR
     )
 
     return {
