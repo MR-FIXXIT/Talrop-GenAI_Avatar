@@ -13,9 +13,11 @@ from sqlalchemy import text
 
 from pinecone_client import get_index
 
-# Core LangChain semantic chunking imports
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_huggingface import HuggingFaceEmbeddings
+
+# NEW: PDF loader (recommended if you already use LangChain)
+from langchain_community.document_loaders import PyPDFLoader
 
 
 @dataclass
@@ -50,9 +52,22 @@ def semantic_chunk_text(
         min_chunk_size=min_chunk_size,
     )
 
-    # SemanticChunker returns Documents via create_documents; take page_content
     docs = splitter.create_documents([text])
     return [d.page_content.strip() for d in docs if d.page_content and d.page_content.strip()]
+
+
+def _extract_text_from_pdf(pdf_path: Path) -> str:
+    """
+    Extract text from a PDF on disk.
+    Note: scanned/image-only PDFs will often return empty text without OCR.
+    """
+    try:
+        loader = PyPDFLoader(str(pdf_path))
+        docs = loader.load()
+        text_content = "\n\n".join(d.page_content for d in docs if d.page_content)
+        return (text_content or "").strip()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not extract text from PDF: {e}")
 
 
 def ingest_and_index_text_file(
@@ -62,23 +77,42 @@ def ingest_and_index_text_file(
     file: UploadFile,
     upload_dir: Path,
 ) -> UploadResult:
-    # ---- validate / read ----
-    if not file.content_type or not file.content_type.startswith("text/"):
-        raise HTTPException(status_code=400, detail="Only text/* files supported for now")
+    # ---- validate type (NOW supports text/* and PDFs) ----
+    filename = (file.filename or "uploaded").strip()
+    content_type = file.content_type or ""
 
+    is_pdf = content_type == "application/pdf" or filename.lower().endswith(".pdf")
+    is_text = content_type.startswith("text/")
+
+    if not (is_text or is_pdf):
+        raise HTTPException(
+            status_code=400,
+            detail="Only text/* and application/pdf files supported for now",
+        )
+
+    # ---- read raw bytes once ----
     raw = file.file.read()
-    text_content = raw.decode("utf-8", errors="ignore").strip()
-    if not text_content:
-        raise HTTPException(status_code=400, detail="File has no readable text")
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty upload")
 
     # ---- save to disk ----
     org_folder = upload_dir / org_id
     org_folder.mkdir(parents=True, exist_ok=True)
 
     doc_uuid = str(uuid.uuid4())
-    safe_name = file.filename or "uploaded.txt"
+    safe_name = filename or ("uploaded.pdf" if is_pdf else "uploaded.txt")
     storage_path = org_folder / f"{doc_uuid}_{safe_name}"
-    storage_path.write_text(text_content, encoding="utf-8")
+
+    if is_pdf:
+        storage_path.write_bytes(raw)
+        text_content = _extract_text_from_pdf(storage_path)
+    else:
+        text_content = raw.decode("utf-8", errors="ignore").strip()
+        storage_path.write_text(text_content, encoding="utf-8")
+
+    if not text_content:
+        # Common for scanned PDFs (image-only) without OCR
+        raise HTTPException(status_code=400, detail="File has no readable text")
 
     # ---- create documents row (required for chunks FK) ----
     db.execute(
@@ -97,19 +131,19 @@ def ingest_and_index_text_file(
             "id": doc_uuid,
             "org_id": org_id,
             "filename": safe_name,
-            "content_type": file.content_type,
+            "content_type": (content_type or ("application/pdf" if is_pdf else "text/plain")),
             "storage_path": str(storage_path),
         },
     )
 
-    # ---- LangChain semantic chunk ----
+    # ---- semantic chunk ----
     chunks = semantic_chunk_text(
         text_content,
         min_chunk_size=200,
         buffer_size=1,
         breakpoint_threshold_type="percentile",
         breakpoint_threshold_amount=95.0,
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
     )
 
     # ---- insert chunks + build pinecone records with SAME chunk_id ----
@@ -148,13 +182,15 @@ def ingest_and_index_text_file(
             },
         )
 
-        records.append({
-            "id": chunk_id,          # MUST match Postgres chunks.id
-            "text": ch,              # Pinecone indexes/embeds this
-            "document_id": doc_uuid,
-            "chunk_index": i,
-            "filename": safe_name,
-        })
+        records.append(
+            {
+                "id": chunk_id,
+                "text": ch,
+                "document_id": doc_uuid,
+                "chunk_index": i,
+                "filename": safe_name,
+            }
+        )
 
     db.commit()
     index.upsert_records(namespace=org_id, records=records)
@@ -164,5 +200,5 @@ def ingest_and_index_text_file(
         chunks_inserted=len(chunks),
         filename=safe_name,
         storage_path=str(storage_path),
-        content_type=file.content_type,
+        content_type=(content_type or ("application/pdf" if is_pdf else "text/plain")),
     )
