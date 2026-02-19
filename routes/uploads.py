@@ -1,4 +1,3 @@
-# routes/documents.py
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -8,7 +7,7 @@ from db import get_db
 from auth import require_tenant
 from rag.ingestion import ingest_and_index_text_file
 
-router = APIRouter(tags=["documents"])
+router = APIRouter(tags=["uploads"])
 
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
