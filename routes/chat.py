@@ -10,15 +10,17 @@ from sqlalchemy import text
 from db import get_db
 from auth import require_tenant
 
-from rag.chat_rag import (
-    build_llm,
-    history_to_lc,
-    contextualize_question,
-    retrieve_context,
-    build_effective_system_prompt,
-    generate_answer,
-    strip_think,
-)
+# from rag.chat_rag import (
+#     build_llm,
+#     history_to_lc,
+#     contextualize_question,
+#     retrieve_context,
+#     build_effective_system_prompt,
+#     generate_answer,
+#     strip_think,
+# )
+
+from rag.chat_rag import chat_rag
 
 router = APIRouter(tags=["chat"])
 
@@ -61,43 +63,54 @@ def chat(payload: ChatRequest, ctx=Depends(require_tenant), db: Session = Depend
     ).mappings().first()
 
     # RAG-only:
-    llm = build_llm(temperature=0.0, max_new_tokens=512)
+    # llm = chat_rag.build_llm(temperature=0.0, max_new_tokens=512)
 
-    lc_history = history_to_lc([m.model_dump() for m in payload.chat_history])
+    # lc_history = chat_rag.history_to_lc([m.model_dump() for m in payload.chat_history])
 
-    standalone_question = contextualize_question(
-        llm,
-        user_message=user_message,
-        lc_history=lc_history,
-    )
+    # standalone_question = chat_rag.contextualize_question(
+    #     llm,
+    #     user_message=user_message,
+    #     lc_history=lc_history,
+    # )
 
-    context, match_ids = retrieve_context(
+    # context, match_ids = chat_rag.retrieve_context(
+    #     db,
+    #     org_id=org_id,
+    #     question=standalone_question,
+    #     top_k=payload.top_k,
+    # )
+
+    # system_prompt = chat_rag.build_effective_system_prompt(
+    #     org_system_prompt=(settings["system_prompt"] if settings else None),
+    # )
+
+    # answer = chat_rag.generate_answer(
+    #     llm,
+    #     system_prompt=system_prompt,
+    #     user_message=user_message,
+    #     lc_history=lc_history,
+    #     context=context,
+    # )
+    # answer = chat_rag.strip_think(answer)
+
+    result = chat_rag(
         db,
         org_id=org_id,
-        question=standalone_question,
+        user_message=user_message,
+        history=[m.model_dump() for m in payload.chat_history],
+        org_system_prompt=(settings["system_prompt"] if settings else None),
+        temperature=0.0,
+        max_new_tokens=512,
         top_k=payload.top_k,
     )
 
-    system_prompt = build_effective_system_prompt(
-        org_system_prompt=(settings["system_prompt"] if settings else None),
-    )
-
-    answer = generate_answer(
-        llm,
-        system_prompt=system_prompt,
-        user_message=user_message,
-        lc_history=lc_history,
-        context=context,
-    )
-    answer = strip_think(answer)
-
     return {
         "org_id": org_id,
-        "question_used_for_retrieval": standalone_question,
-        "retrieved_chunks": len(match_ids),
-        "match_ids": match_ids,
+        "question_used_for_retrieval": result.standalone_question,
+        "retrieved_chunks": len(result.match_ids),
+        "match_ids": result.match_ids,
         "avatar_settings_found": bool(settings),
         "tone": settings["tone"] if settings else None,
-        "answer": answer,
-        "context_preview": context[:1200],
+        "answer": result.answer,
+        "context_preview": result.context[:1200],
     }

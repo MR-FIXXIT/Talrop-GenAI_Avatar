@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Literal, Optional, Sequence
+from typing import List, Literal, Optional, Sequence
 
 from sqlalchemy.orm import Session
 
@@ -12,10 +12,11 @@ from rag.generator import (
     build_llm,
     history_to_lc,
     contextualize_question,
-    build_effective_system_prompt,
     generate_answer,
     strip_think,
 )
+
+import rag.prompts as prompts
 
 
 Role = Literal["user", "assistant"]
@@ -69,20 +70,25 @@ def chat_rag(
         min_score=min_score,
     )
 
-    system_prompt = build_effective_system_prompt(org_system_prompt=org_system_prompt)
+    # Enforce the contract early (recommended) to avoid calling the LLM with no context.
+    if not context or not context.strip():
+        answer = "I don't know."
+    else:
+        system_prompt = prompts.build_effective_qa_system_prompt(
+            org_system_prompt=org_system_prompt,
+            context=context,
+        )
 
-    answer = generate_answer(
-        llm,
-        system_prompt=system_prompt,
-        user_message=user_message,
-        lc_history=lc_history,
-        context=context,
-    )
+        answer = generate_answer(
+            llm,
+            system_prompt=system_prompt,
+            user_message=user_message,
+            lc_history=lc_history,
+        )
 
     if strip_model_think_tags:
         answer = strip_think(answer)
 
-    # Enforce the contract if model returns empty
     answer = (answer or "").strip() or "I don't know."
 
     return RagResult(
