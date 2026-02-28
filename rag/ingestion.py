@@ -20,8 +20,13 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.document_loaders import PyPDFLoader
 
 
+
 @dataclass
 class UploadResult:
+    # A small structured return value:
+    # - document_id: UUID for the uploaded document (stored in DB)
+    # - chunks_inserted: number of semantic chunks created
+    # - filename, storage_path, content_type: metadata about the stored file
     document_id: str
     chunks_inserted: int
     filename: str
@@ -38,6 +43,22 @@ def semantic_chunk_text(
     breakpoint_threshold_type: str = "percentile",
     breakpoint_threshold_amount: float = 95.0,
 ) -> list[str]:
+    # Input: raw text string
+    # Output: list of chunk strings
+    # 
+    # How it works:
+    # - Normalizes line endings, strips whitespace
+    # - Creates HuggingFaceEmbeddings(model_name=...) (here: sentence-transformers/all-MiniLM-L6-v2)
+    # 
+    # - Builds a SemanticChunker which:
+    #   - embeds text
+    #   - tries to split at “semantic breakpoints” (where meaning changes) rather than fixed-size windows
+    #   - uses parameters like:
+    #     - buffer_size=1: keeps a small context window when deciding splits
+    #     - breakpoint_threshold_type="percentile" and amount=95.0: “only split at relatively strong semantic-change points”
+    #     - min_chunk_size=200: avoids tiny chunks
+    # 
+    # - Returns the cleaned chunk contents
     text = text.replace("\r\n", "\n").strip()
     if not text:
         return []
