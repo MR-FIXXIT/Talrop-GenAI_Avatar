@@ -5,8 +5,8 @@ from sqlalchemy.orm import Session
 
 from db import get_db
 from auth import require_tenant
-# from rag.ingestion import ingest_and_index_text_file
-from rag.ingestion_textbook_experiment import ingest_and_index_textbook_pdf_experiment
+from rag.ingestion import ingest_and_index_text_file
+# from rag.ingestion_textbook_experiment import ingest_and_index_textbook_pdf_experiment
 
 router = APIRouter(tags=["uploads"])
 
@@ -27,7 +27,7 @@ async def upload_document(
     require_scope(ctx, "upload")
     org_id = str(ctx["org_id"])
 
-    result = ingest_and_index_textbook_pdf_experiment(
+    result = ingest_and_index_text_file(
         db=db,
         org_id=org_id,
         file=file,
