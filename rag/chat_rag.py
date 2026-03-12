@@ -1,25 +1,29 @@
-# rag/chat_rag.py
+#rag/chat_rag.py
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import List, Literal, Optional, Sequence
-
 from sqlalchemy.orm import Session
 
-from rag.retriever import retrieve_context
+from rag.retriever import retrieve_context, RetrievedChunk
+
 from rag.generator import (
     HistoryItem,
     build_llm,
     history_to_lc,
     contextualize_question,
-    generate_answer,
-    strip_think,
+    extract_supported_facts,
+    generate_answer_from_facts,
+    revise_answer_for_faithfulness,
+    normalize_final_answer,
 )
 
 import rag.prompts as prompts
 
 
 Role = Literal["user", "assistant"]
+
+_NO_CONTEXT_ANSWER = "Answer: I don't know based on the provided context."
 
 
 @dataclass
@@ -28,6 +32,17 @@ class RagResult:
     match_ids: List[str]
     context: str
     answer: str
+    supported_facts: str
+
+
+def format_labeled_context(chunks: List[RetrievedChunk]) -> str:
+    parts: List[str] = []
+    for i, ch in enumerate(chunks, start=1):
+        text = (ch.text or "").strip()
+        if not text:
+            continue
+        parts.append(f"[c{i}] (source_id={ch.chunk_id}, score={ch.score:.4f})\n{text}")
+    return "\n\n".join(parts).strip()
 
 
 def chat_rag(
@@ -37,11 +52,10 @@ def chat_rag(
     user_message: str,
     history: Sequence[HistoryItem],
     org_system_prompt: Optional[str] = None,
-    temperature: float = 0.0,
-    max_new_tokens: int = 512,
+    temperature: float,
+    max_new_tokens: int,
     top_k: int = 5,
-    min_score: float = 0.3,
-    strip_model_think_tags: bool = True,
+    min_score: float = 0.1,
 ) -> RagResult:
     """
     Orchestrates the RAG flow:
@@ -62,38 +76,81 @@ def chat_rag(
         lc_history=lc_history,
     )
 
-    context, match_ids = retrieve_context(
+    # Recommended retriever contract:
+    # returns List[RetrievedChunk]
+    chunks = retrieve_context(
         db,
         org_id=org_id,
         question=standalone_question,
         top_k=top_k,
         min_score=min_score,
+        return_chunks=True,
     )
 
-    # Enforce the contract early (recommended) to avoid calling the LLM with no context.
-    if not context or not context.strip():
-        answer = "I don't know."
+    if not chunks:
+        return RagResult(
+            standalone_question=standalone_question,
+            match_ids=[],
+            context="",
+            answer=_NO_CONTEXT_ANSWER,
+            supported_facts="NO_SUPPORT",
+        )
+
+    match_ids = [c.chunk_id for c in chunks]
+    labeled_context = format_labeled_context(chunks)
+
+    fact_extract_system_prompt = prompts.build_effective_fact_extract_system_prompt(
+        org_system_prompt=org_system_prompt,
+        context=labeled_context,
+    )
+
+    supported_facts = extract_supported_facts(
+        llm,
+        system_prompt=fact_extract_system_prompt,
+        question=standalone_question,
+    )
+    
+    if not supported_facts or supported_facts.strip() == "NO_SUPPORT":
+        answer = _NO_CONTEXT_ANSWER
     else:
-        system_prompt = prompts.build_effective_qa_system_prompt(
-            org_system_prompt=org_system_prompt,
-            context=context,
+        answer_from_facts_system_prompt = (
+            prompts.build_effective_answer_from_facts_system_prompt(
+                org_system_prompt=org_system_prompt,
+                context=labeled_context,
+                supported_facts=supported_facts,
+            )
         )
 
-        answer = generate_answer(
+
+        draft_answer = generate_answer_from_facts(
             llm,
-            system_prompt=system_prompt,
-            user_message=user_message,
-            lc_history=lc_history,
+            system_prompt=answer_from_facts_system_prompt,
+            question=standalone_question,
         )
 
-    if strip_model_think_tags:
-        answer = strip_think(answer)
 
-    answer = (answer or "").strip() or "I don't know."
+        revision_system_prompt = (
+            prompts.build_effective_faithfulness_revision_system_prompt(
+                org_system_prompt=org_system_prompt,
+                context=labeled_context,
+                draft_answer=draft_answer,
+            )
+        )
+
+        answer = revise_answer_for_faithfulness(
+            llm,
+            system_prompt=revision_system_prompt,
+            question=standalone_question,
+        )
+
+        print(answer)
+
+    answer = normalize_final_answer(answer)
 
     return RagResult(
         standalone_question=standalone_question,
         match_ids=match_ids,
-        context=context,
+        context=labeled_context,
         answer=answer,
+        supported_facts=supported_facts,
     )

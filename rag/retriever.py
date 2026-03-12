@@ -1,13 +1,21 @@
 # rag/retriever.py
+
 from __future__ import annotations
 
-from ast import If
-from typing import Any, Dict, List, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List
 
-from sqlalchemy.orm import Session
 from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from pinecone_client import get_index
+
+
+@dataclass
+class RetrievedChunk:
+    chunk_id: str
+    text: str
+    score: float
 
 
 def retrieve_context(
@@ -17,52 +25,59 @@ def retrieve_context(
     question: str,
     top_k: int = 5,
     min_score: float = 0.3,
-) -> Tuple[str, List[str]]:
+    return_chunks: bool = False,
+) -> List[RetrievedChunk] | tuple[str, List[str]]:
     """
-    Pinecone search (namespace=org_id) -> chunk ids -> fetch content from Postgres -> context string.
+    Pinecone search (namespace=org_id) -> chunk ids -> fetch content from Postgres.
 
-    Returns:
-        (context, match_ids)
+    If return_chunks=True:
+        returns List[RetrievedChunk]
+
+    Else:
+        returns (context, match_ids) for backward compatibility
     """
 
     index = get_index()
 
-
-    # 1) Search Pinecone for similar chunks
-    # - Searches only inside namespace=org_id (tenant isolation)
-    # - question is used as the query text
-    # - Returns top top_k matches (“hits”)
-    # - Requests some metadata fields, but this function doesn’t use them—it mainly uses _id and _score.
     results = index.search(
         namespace=org_id,
         query={"inputs": {"text": question}, "top_k": top_k},
-        fields=["document_id", "chunk_index", "filename"],
+        fields=["document_id", "chunk_index", "filename"]
     )
-    # ////////////////////////////////////////////////////
 
-    # 2) Basic filtering: no hits or too low confidence
-    # - If Pinecone returns nothing → no context
-    # - If the best match score is below min_score (default 0.3) → treat as irrelevant, return empty context
     hits = results.get("result", {}).get("hits", []) or []
+
     if not hits:
-        return ("", [])
+        return [] if return_chunks else ("", [])
 
     best_score = float(hits[0].get("_score", 0.0) or 0.0)
     if best_score < min_score:
-        return ("", [])
-    # ////////////////////////////////////////////////////
-    
+        return [] if return_chunks else ("", [])
 
-    # 3) Collect Pinecone match IDs (chunk IDs)
-    # Your ingestion code upserted Pinecone records with:
-    # - id = chunk_id (UUID used in Postgres chunks.id)
-    # So Pinecone _id == Postgres chunks.id. This is the key join.
-    match_ids = [h.get("_id") for h in hits if h.get("_id")]
-    if not match_ids:
-        return ("", [])
-    # ////////////////////////////////////////////////////
-    
+    # Keep score + rank order from Pinecone
+    ranked_hits = []
+    for h in hits:
+        chunk_id = h.get("_id")
+        if not chunk_id:
+            continue
 
+        score = float(h.get("_score", 0.0) or 0.0)
+
+        # filter every hit, not just best hit
+        if score < min_score:
+            continue
+
+        ranked_hits.append(
+            {
+                "chunk_id": str(chunk_id),
+                "score": score,
+            }
+        )
+
+    if not ranked_hits:
+        return [] if return_chunks else ("", [])
+
+    match_ids = [h["chunk_id"] for h in ranked_hits]
 
     placeholders = ", ".join([f":id{i}" for i in range(len(match_ids))])
     params: Dict[str, Any] = {
@@ -70,11 +85,6 @@ def retrieve_context(
         **{f"id{i}": match_ids[i] for i in range(len(match_ids))},
     }
 
-
-    # 4) Fetch chunk text from Postgres for those IDs
-    # It dynamically builds a parameterized IN (...) query:
-    # - Creates placeholders like :id0, :id1, :id2, ...
-    # - Builds params dict including org_id and each idN
     rows = (
         db.execute(
             text(
@@ -90,17 +100,27 @@ def retrieve_context(
         .mappings()
         .all()
     )
-    # This ensures you only pull chunks belonging to the current org.
-    # ////////////////////////////////////////////////////
 
-    
-    # 5) Build the final context string in ranking order
-    # DB results might come back in any order, so it maps id → content
-    # Then concatenates content in the same order Pinecone ranked them (match_ids order)
-    # Separates chunks with ---
-    content_by_id = {str(r["id"]): r["content"] for r in rows}
-    context = "\n\n---\n\n".join(content_by_id[i] for i in match_ids if i in content_by_id)
-    # ////////////////////////////////////////////////////
+    content_by_id = {str(r["id"]): (r["content"] or "").strip() for r in rows}
 
+    retrieved_chunks: List[RetrievedChunk] = []
+    for h in ranked_hits:
+        chunk_id = h["chunk_id"]
+        chunk_text = content_by_id.get(chunk_id, "").strip()
+        if not chunk_text:
+            continue
 
+        retrieved_chunks.append(
+            RetrievedChunk(
+                chunk_id=chunk_id,
+                text=chunk_text,
+                score=h["score"],
+            )
+        )
+
+    if return_chunks:
+        return retrieved_chunks
+
+    context = "\n\n---\n\n".join(chunk.text for chunk in retrieved_chunks)
+    match_ids = [chunk.chunk_id for chunk in retrieved_chunks]
     return (context, match_ids)

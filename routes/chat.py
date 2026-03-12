@@ -10,16 +10,6 @@ from sqlalchemy import text
 from db import get_db
 from auth import require_tenant
 
-# from rag.chat_rag import (
-#     build_llm,
-#     history_to_lc,
-#     contextualize_question,
-#     retrieve_context,
-#     build_effective_system_prompt,
-#     generate_answer,
-#     strip_think,
-# )
-
 from rag.chat_rag import chat_rag
 
 router = APIRouter(tags=["chat"])
@@ -62,37 +52,7 @@ def chat(payload: ChatRequest, ctx=Depends(require_tenant), db: Session = Depend
         {"org_id": org_id},
     ).mappings().first()
 
-    # RAG-only:
-    # llm = chat_rag.build_llm(temperature=0.0, max_new_tokens=512)
-
-    # lc_history = chat_rag.history_to_lc([m.model_dump() for m in payload.chat_history])
-
-    # standalone_question = chat_rag.contextualize_question(
-    #     llm,
-    #     user_message=user_message,
-    #     lc_history=lc_history,
-    # )
-
-    # context, match_ids = chat_rag.retrieve_context(
-    #     db,
-    #     org_id=org_id,
-    #     question=standalone_question,
-    #     top_k=payload.top_k,
-    # )
-
-    # system_prompt = chat_rag.build_effective_system_prompt(
-    #     org_system_prompt=(settings["system_prompt"] if settings else None),
-    # )
-
-    # answer = chat_rag.generate_answer(
-    #     llm,
-    #     system_prompt=system_prompt,
-    #     user_message=user_message,
-    #     lc_history=lc_history,
-    #     context=context,
-    # )
-    # answer = chat_rag.strip_think(answer)
-
+    
     result = chat_rag(
         db,
         org_id=org_id,
@@ -100,7 +60,7 @@ def chat(payload: ChatRequest, ctx=Depends(require_tenant), db: Session = Depend
         history=[m.model_dump() for m in payload.chat_history],
         org_system_prompt=(settings["system_prompt"] if settings else None),
         temperature=0.0,
-        max_new_tokens=512,
+        max_new_tokens=3000,
         top_k=payload.top_k,
     )
 
@@ -112,5 +72,5 @@ def chat(payload: ChatRequest, ctx=Depends(require_tenant), db: Session = Depend
         "avatar_settings_found": bool(settings),
         "tone": settings["tone"] if settings else None,
         "answer": result.answer,
-        "context_preview": result.context[:1200],
+        "context_preview": result.context[:],
     }
