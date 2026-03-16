@@ -109,6 +109,8 @@ def chat_rag(
         system_prompt=fact_extract_system_prompt,
         question=standalone_question,
     )
+
+    print(f"Supported Facts : {supported_facts}")
     
     if not supported_facts or supported_facts.strip() == "NO_SUPPORT":
         answer = _NO_CONTEXT_ANSWER
@@ -128,6 +130,7 @@ def chat_rag(
             question=standalone_question,
         )
 
+        print(f"Draft Answer : {draft_answer}")
 
         revision_system_prompt = (
             prompts.build_effective_faithfulness_revision_system_prompt(
@@ -143,7 +146,7 @@ def chat_rag(
             question=standalone_question,
         )
 
-        print(answer)
+        print(f"Answer : {answer}")
 
     answer = normalize_final_answer(answer)
 

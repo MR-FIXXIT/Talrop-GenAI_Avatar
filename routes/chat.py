@@ -1,7 +1,10 @@
 # routes/chat.py
 from typing import List, Literal
+import re
+import json
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
 
 from sqlalchemy.orm import Session
@@ -11,6 +14,7 @@ from db import get_db
 from auth import require_tenant
 
 from rag.chat_rag import chat_rag
+
 
 router = APIRouter(tags=["chat"])
 
@@ -23,7 +27,8 @@ class ChatMsg(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     chat_history: List[ChatMsg] = Field(default_factory=list)
-    top_k: int = 5
+    evaluate: bool = False
+    top_k: int = 3
 
 
 def require_scope(ctx: dict, needed: str):
@@ -31,9 +36,39 @@ def require_scope(ctx: dict, needed: str):
     if needed not in scopes:
         raise HTTPException(status_code=403, detail=f"Missing scope: {needed}")
 
+def run_evaluation(query: str, generated_answer: str, retrieved_context: str):
+    try:
+        from eval.evaluation import evaluate_generation
+
+        #split each retrieved chunk into individual string in a list
+        pattern = r'\[c\d+\]\s\(source_id=[^)]*\)'
+        parts = re.split(pattern, retrieved_context)
+        chunks = [part.strip() for part in parts if part.strip()]
+
+
+        eval_result = evaluate_generation(
+            query=query,
+            generated_answer=generated_answer,
+            context=chunks
+        )
+
+        path = f'C:/Users/banuv/Desktop/Talrop-GenAI_Avatar/eval/result_{datetime.now().strftime("%d-%m-%Y_%H-%M-%S")}.json'
+
+        with open(path, "w") as f:
+            json.dump(eval_result, f, indent=2)
+
+    except Exception as e:
+        print("Evaluation failed")
+        print(str(e))
+
 
 @router.post("/chat")
-def chat(payload: ChatRequest, ctx=Depends(require_tenant), db: Session = Depends(get_db)):
+def chat(
+    payload: ChatRequest,
+    background_tasks: BackgroundTasks,
+    ctx=Depends(require_tenant),
+    db: Session = Depends(get_db)
+):
     require_scope(ctx, "chat")
     org_id = str(ctx["org_id"])
 
@@ -63,6 +98,16 @@ def chat(payload: ChatRequest, ctx=Depends(require_tenant), db: Session = Depend
         max_new_tokens=3000,
         top_k=payload.top_k,
     )
+
+    #run evaluation after returning the endpoint
+    if payload.evaluate:
+        background_tasks.add_task(
+            run_evaluation,
+            query=payload.message,
+            generated_answer=result.answer,
+            retrieved_context=result.context,
+        )
+
 
     return {
         "org_id": org_id,
