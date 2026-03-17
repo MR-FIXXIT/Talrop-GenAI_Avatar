@@ -17,9 +17,6 @@ from rag.scraping import scrape_static_url, scraped_page_to_uploadfile
 
 router = APIRouter(tags=["documents"])
 
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
-
 MAX_URLS_PER_REQUEST = 20
 DELAY_BETWEEN_URLS_S = 0.5  # polite delay
 
@@ -66,7 +63,6 @@ async def scrape_and_ingest(
                 db=db,
                 org_id=org_id,
                 file=upload_file,
-                upload_dir=UPLOAD_DIR,
             )
 
             results.append(

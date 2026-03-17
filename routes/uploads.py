@@ -10,9 +10,6 @@ from rag.ingestion_textbook_experiment import ingest_and_index_textbook_pdf_expe
 
 router = APIRouter(tags=["uploads"])
 
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
-
 def require_scope(ctx: dict, needed: str):
     scopes = ctx.get("scopes") or []
     if needed not in scopes:
@@ -31,7 +28,6 @@ async def upload_document(
         db=db,
         org_id=org_id,
         file=file,
-        upload_dir=UPLOAD_DIR
     )
 
     return {

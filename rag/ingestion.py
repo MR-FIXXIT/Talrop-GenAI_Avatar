@@ -103,7 +103,6 @@ def ingest_and_index_text_file(
     db: Session,
     org_id: str,
     file: UploadFile,
-    upload_dir: Path,
 ) -> UploadResult:
     # ---- validate type (NOW supports text/* and PDFs) ----
     filename = (file.filename or "uploaded").strip()
