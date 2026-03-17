@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import uuid
+import io
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -19,6 +20,8 @@ from langchain_huggingface import HuggingFaceEmbeddings
 # NEW: PDF loader (recommended if you already use LangChain)
 from langchain_community.document_loaders import PyPDFLoader
 
+from pypdf import PdfReader
+
 
 
 @dataclass
@@ -26,11 +29,10 @@ class UploadResult:
     # A small structured return value:
     # - document_id: UUID for the uploaded document (stored in DB)
     # - chunks_inserted: number of semantic chunks created
-    # - filename, storage_path, content_type: metadata about the stored file
+    # - filename, content_type: metadata about the stored file
     document_id: str
     chunks_inserted: int
     filename: str
-    storage_path: str
     content_type: Optional[str]
 
 
@@ -77,16 +79,21 @@ def semantic_chunk_text(
     return [d.page_content.strip() for d in docs if d.page_content and d.page_content.strip()]
 
 
-def _extract_text_from_pdf(pdf_path: Path) -> str:
+def _extract_text_from_pdf(pdf_bytes: bytes) -> str:
     """
-    Extract text from a PDF on disk.
-    Note: scanned/image-only PDFs will often return empty text without OCR.
+    Extract text from PDF bytes in memory.
+    Note: scanned/image-only PDFs usually return little or no text without OCR.
     """
     try:
-        loader = PyPDFLoader(str(pdf_path))
-        docs = loader.load()
-        text_content = "\n\n".join(d.page_content for d in docs if d.page_content)
-        return (text_content or "").strip()
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        parts: List[str] = []
+
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                parts.append(page_text)
+
+        return "\n\n".join(parts).strip()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Could not extract text from PDF: {e}")
 
@@ -116,35 +123,29 @@ def ingest_and_index_text_file(
     if not raw:
         raise HTTPException(status_code=400, detail="Empty upload")
 
-    # ---- save to disk ----
-    org_folder = upload_dir / org_id
-    org_folder.mkdir(parents=True, exist_ok=True)
-
-    doc_uuid = str(uuid.uuid4())
     safe_name = filename or ("uploaded.pdf" if is_pdf else "uploaded.txt")
-    storage_path = org_folder / f"{doc_uuid}_{safe_name}"
 
     if is_pdf:
-        storage_path.write_bytes(raw)
-        text_content = _extract_text_from_pdf(storage_path)
+        text_content = _extract_text_from_pdf(raw)
     else:
         text_content = raw.decode("utf-8", errors="ignore").strip()
-        storage_path.write_text(text_content, encoding="utf-8")
 
     if not text_content:
         # Common for scanned PDFs (image-only) without OCR
         raise HTTPException(status_code=400, detail="File has no readable text")
+    
+    doc_uuid = str(uuid.uuid4())
+    resolved_content_type = content_type or ("application/pdf" if is_pdf else "text/plain")
 
     # ---- create documents row (required for chunks FK) ----
     db.execute(
         text("""
-            INSERT INTO documents (id, org_id, filename, content_type, storage_path, status)
+            INSERT INTO documents (id, org_id, filename, content_type, status)
             VALUES (
                 CAST(:id AS uuid),
                 CAST(:org_id AS uuid),
                 :filename,
                 :content_type,
-                :storage_path,
                 'ready'
             )
         """),
@@ -153,7 +154,6 @@ def ingest_and_index_text_file(
             "org_id": org_id,
             "filename": safe_name,
             "content_type": (content_type or ("application/pdf" if is_pdf else "text/plain")),
-            "storage_path": str(storage_path),
         },
     )
 
@@ -220,6 +220,5 @@ def ingest_and_index_text_file(
         document_id=doc_uuid,
         chunks_inserted=len(chunks),
         filename=safe_name,
-        storage_path=str(storage_path),
-        content_type=(content_type or ("application/pdf" if is_pdf else "text/plain")),
+        content_type=resolved_content_type,
     )

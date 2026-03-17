@@ -27,7 +27,6 @@ class Document(Base):
     filename: Mapped[str] = mapped_column(Text, nullable=False)
 
     content_type: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    storage_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     status: Mapped[str] = mapped_column(
         Text,
