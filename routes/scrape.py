@@ -12,7 +12,7 @@ from starlette.concurrency import run_in_threadpool
 
 from auth import require_tenant
 from db import get_db
-from rag.ingestion import ingest_and_index_text_file
+from rag.ingestion_old import ingest_and_index_text_file
 from rag.scraping import scrape_static_url, scraped_page_to_uploadfile
 
 router = APIRouter(tags=["documents"])
