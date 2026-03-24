@@ -1,10 +1,8 @@
 # rag/ingestion.py
 from __future__ import annotations
 
-import json
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException, UploadFile
@@ -17,7 +15,6 @@ from rag.textbook_chunker import preprocess_textbook_pdf
 @dataclass
 class UploadResult:
     document_id: str
-    # chunks_inserted: int
     filename: str
     content_type: Optional[str]
 
@@ -100,7 +97,6 @@ def ingest_and_index(
 
     return UploadResult(
         document_id=doc_uuid,
-        # chunks_inserted=len(records),
         filename=filename,
         content_type="application/pdf",
     )

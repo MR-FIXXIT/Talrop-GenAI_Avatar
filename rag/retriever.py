@@ -3,124 +3,73 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List
-
-from sqlalchemy import text
-from sqlalchemy.orm import Session
+from typing import List
 
 from pinecone_client import get_index
 
 
 @dataclass
 class RetrievedChunk:
-    chunk_id: str
     text: str
     score: float
+    page_number: int
+    file_name: str
 
 
 def retrieve_context(
-    db: Session,
-    *,
+    *,  
     org_id: str,
     question: str,
-    top_k: int = 5,
+    top_k: int ,
     min_score: float = 0.3,
-    return_chunks: bool = False,
-) -> List[RetrievedChunk] | tuple[str, List[str]]:
-    """
-    Pinecone search (namespace=org_id) -> chunk ids -> fetch content from Postgres.
-
-    If return_chunks=True:
-        returns List[RetrievedChunk]
-
-    Else:
-        returns (context, match_ids) for backward compatibility
-    """
+) -> List[RetrievedChunk]:
 
     index = get_index()
 
     results = index.search(
         namespace=org_id,
         query={"inputs": {"text": question}, "top_k": top_k},
-        fields=["document_id", "chunk_index", "filename"]
+        fields=["page_number", "filename", "text"]
     )
 
     hits = results.get("result", {}).get("hits", []) or []
 
-    if not hits:
-        return [] if return_chunks else ("", [])
-
-    best_score = float(hits[0].get("_score", 0.0) or 0.0)
-    if best_score < min_score:
-        return [] if return_chunks else ("", [])
-
-    # Keep score + rank order from Pinecone
-    ranked_hits = []
+    retrieved_chunks: List[RetrievedChunk] = []
     for h in hits:
-        chunk_id = h.get("_id")
-        if not chunk_id:
-            continue
 
-        score = float(h.get("_score", 0.0) or 0.0)
+        score = float(h.get("_score", 0.0))
 
         # filter every hit, not just best hit
         if score < min_score:
-            continue
+            break
 
-        ranked_hits.append(
-            {
-                "chunk_id": str(chunk_id),
-                "score": score,
-            }
-        )
-
-    if not ranked_hits:
-        return [] if return_chunks else ("", [])
-
-    match_ids = [h["chunk_id"] for h in ranked_hits]
-
-    placeholders = ", ".join([f":id{i}" for i in range(len(match_ids))])
-    params: Dict[str, Any] = {
-        "org_id": org_id,
-        **{f"id{i}": match_ids[i] for i in range(len(match_ids))},
-    }
-
-    rows = (
-        db.execute(
-            text(
-                f"""
-                SELECT id, content
-                FROM chunks
-                WHERE org_id = CAST(:org_id AS uuid)
-                  AND id IN ({placeholders})
-                """
-            ),
-            params,
-        )
-        .mappings()
-        .all()
-    )
-
-    content_by_id = {str(r["id"]): (r["content"] or "").strip() for r in rows}
-
-    retrieved_chunks: List[RetrievedChunk] = []
-    for h in ranked_hits:
-        chunk_id = h["chunk_id"]
-        chunk_text = content_by_id.get(chunk_id, "").strip()
-        if not chunk_text:
-            continue
+        score = h["_score"]
+        chunk_text = h.get("fields", {}).get("text", "")
+        page_number = h.get("fields", {}).get("page_number")
+        file_name = h.get("fields", {}).get("filename", "")
 
         retrieved_chunks.append(
             RetrievedChunk(
-                chunk_id=chunk_id,
                 text=chunk_text,
-                score=h["score"],
+                score=score,
+                page_number=page_number,
+                file_name=file_name,
             )
         )
 
-    if return_chunks:
-        return retrieved_chunks
+    return retrieved_chunks
 
-    context = "\n\n---\n\n".join(chunk.text for chunk in retrieved_chunks)
-    match_ids = [chunk.chunk_id for chunk in retrieved_chunks]
-    return (context, match_ids)
+
+
+if __name__ == "__main__":
+    context_retrieved = retrieve_context(org_id="0e6dd009-b0ea-47b5-9083-85239f62d5ba",
+                                         top_k=5,
+                                         question="What is a fourier transform?") 
+    
+    for i,c in enumerate(context_retrieved, start=1):
+        print(f"Retrieved Context {i}")
+        print(f"Score : {c.score}")
+        print(f"Page number : {c.page_number}")
+        print(f"File name : {c.file_name}")
+        print(f"Context : {c.text}")
+        print("============================")

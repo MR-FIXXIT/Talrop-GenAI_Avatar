@@ -5,12 +5,4 @@ data
 uploads
 .vscode
 .idea
-
-
-
-
-
-
-#files for testing in local system
-rag/ingestion_textbook_experiment.py
-rag/textbook_chunker.py
+eval/*.json

@@ -36,9 +36,15 @@ def require_scope(ctx: dict, needed: str):
     if needed not in scopes:
         raise HTTPException(status_code=403, detail=f"Missing scope: {needed}")
 
+
+
 def run_evaluation(query: str, generated_answer: str, retrieved_context: str):
     try:
-        from eval.evaluation import evaluate_generation
+        from eval.evaluation import(
+            evaluate_generation, 
+            evaluate_retrieval, 
+            evaluate_pipeline
+        ) 
 
         #split each retrieved chunk into individual string in a list
         pattern = r'\[c\d+\]\s\(source_id=[^)]*\)'
@@ -46,11 +52,24 @@ def run_evaluation(query: str, generated_answer: str, retrieved_context: str):
         chunks = [part.strip() for part in parts if part.strip()]
 
 
-        eval_result = evaluate_generation(
+        # generation_eval_result = evaluate_generation(
+        #     query=query,
+        #     generated_answer=generated_answer,
+        #     context=chunks
+        # )
+
+        # retrieval_eval_result = evaluate_retrieval(
+        #     query=query,
+        #     generated_answer=generated_answer,
+        #     context=chunks
+        # )
+
+        eval_result = evaluate_pipeline(
             query=query,
             generated_answer=generated_answer,
             context=chunks
         )
+        
 
         path = f'C:/Users/banuv/Desktop/Talrop-GenAI_Avatar/eval/result_{datetime.now().strftime("%d-%m-%Y_%H-%M-%S")}.json'
 
@@ -60,6 +79,7 @@ def run_evaluation(query: str, generated_answer: str, retrieved_context: str):
     except Exception as e:
         print("Evaluation failed")
         print(str(e))
+
 
 
 @router.post("/chat")
@@ -89,7 +109,6 @@ def chat(
 
     
     result = chat_rag(
-        db,
         org_id=org_id,
         user_message=user_message,
         history=[m.model_dump() for m in payload.chat_history],
@@ -112,8 +131,6 @@ def chat(
     return {
         "org_id": org_id,
         "question_used_for_retrieval": result.standalone_question,
-        "retrieved_chunks": len(result.match_ids),
-        "match_ids": result.match_ids,
         "avatar_settings_found": bool(settings),
         "tone": settings["tone"] if settings else None,
         "answer": result.answer,

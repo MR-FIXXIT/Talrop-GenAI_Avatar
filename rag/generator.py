@@ -8,6 +8,7 @@ from typing import Dict, List, Literal, Sequence, Tuple
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
+from langchain_groq import ChatGroq
 
 import rag.prompts as prompts
 
@@ -20,16 +21,24 @@ _NO_CONTEXT_ANSWER = "Answer: I don't know based on the provided context."
 _THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
 
-def build_llm(*, temperature: float, max_new_tokens: int) -> ChatHuggingFace:
-    endpoint = HuggingFaceEndpoint(
-        repo_id="Qwen/Qwen2.5-7B-Instruct",
+def build_llm(*, temperature: float, max_new_tokens: int):
+    # endpoint = HuggingFaceEndpoint(
+    #     repo_id="Qwen/Qwen2.5-7B-Instruct",
+    #     temperature=temperature,
+    #     max_new_tokens=max_new_tokens,
+    #     top_p=1.0,
+    #     repetition_penalty=1.05,
+    #     do_sample=False if temperature == 0 else True,
+    # )
+    # return ChatHuggingFace(llm=endpoint)
+
+    return ChatGroq(
+        model="qwen/qwen3-32b",
         temperature=temperature,
-        max_new_tokens=max_new_tokens,
-        top_p=1.0,
-        repetition_penalty=1.05,
-        do_sample=False if temperature == 0 else True,
+        max_tokens=max_new_tokens,
+        # Optional for Qwen3-32B on Groq:
+        # model_kwargs={"reasoning_effort": "none"}
     )
-    return ChatHuggingFace(llm=endpoint)
 
 
 def history_to_lc(history: Sequence[HistoryItem]) -> List[Tuple[str, str]]:
