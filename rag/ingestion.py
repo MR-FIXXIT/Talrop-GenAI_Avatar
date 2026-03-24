@@ -1,223 +1,127 @@
 # rag/ingestion.py
 from __future__ import annotations
 
-import json
 import uuid
-import io
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException, UploadFile
-from sqlalchemy.orm import Session
-from sqlalchemy import text
 
 from pinecone_client import get_index
 
-from langchain_experimental.text_splitter import SemanticChunker
-from langchain_huggingface import HuggingFaceEmbeddings
-
-# NEW: PDF loader (recommended if you already use LangChain)
-from langchain_community.document_loaders import PyPDFLoader
-
-from pypdf import PdfReader
-
+from rag.textbook_chunker import preprocess_textbook_pdf
 
 
 @dataclass
 class UploadResult:
-    # A small structured return value:
-    # - document_id: UUID for the uploaded document (stored in DB)
-    # - chunks_inserted: number of semantic chunks created
-    # - filename, content_type: metadata about the stored file
     document_id: str
-    chunks_inserted: int
     filename: str
     content_type: Optional[str]
 
 
-def semantic_chunk_text(
-    text: str,
+def ingest_and_index(
     *,
-    model_name: str,
-    min_chunk_size: int,
-    buffer_size: int = 1,
-    breakpoint_threshold_type: str = "percentile",
-    breakpoint_threshold_amount: float = 95.0,
-) -> list[str]:
-    # Input: raw text string
-    # Output: list of chunk strings
-    # 
-    # How it works:
-    # - Normalizes line endings, strips whitespace
-    # - Creates HuggingFaceEmbeddings(model_name=...) (here: sentence-transformers/all-MiniLM-L6-v2)
-    # 
-    # - Builds a SemanticChunker which:
-    #   - embeds text
-    #   - tries to split at “semantic breakpoints” (where meaning changes) rather than fixed-size windows
-    #   - uses parameters like:
-    #     - buffer_size=1: keeps a small context window when deciding splits
-    #     - breakpoint_threshold_type="percentile" and amount=95.0: “only split at relatively strong semantic-change points”
-    #     - min_chunk_size=200: avoids tiny chunks
-    # 
-    # - Returns the cleaned chunk contents
-    text = text.replace("\r\n", "\n").strip()
-    if not text:
-        return []
-
-    embeddings = HuggingFaceEmbeddings(model_name=model_name)
-
-    splitter = SemanticChunker(
-        embeddings=embeddings,
-        buffer_size=buffer_size,
-        breakpoint_threshold_type=breakpoint_threshold_type,
-        breakpoint_threshold_amount=breakpoint_threshold_amount,
-        min_chunk_size=min_chunk_size,
-    )
-
-    docs = splitter.create_documents([text])
-    return [d.page_content.strip() for d in docs if d.page_content and d.page_content.strip()]
-
-
-def _extract_text_from_pdf(pdf_bytes: bytes) -> str:
-    """
-    Extract text from PDF bytes in memory.
-    Note: scanned/image-only PDFs usually return little or no text without OCR.
-    """
-    try:
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        parts: List[str] = []
-
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                parts.append(page_text)
-
-        return "\n\n".join(parts).strip()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not extract text from PDF: {e}")
-
-
-def ingest_and_index_text_file(
-    *,
-    db: Session,
     org_id: str,
     file: UploadFile,
+    # upload_dir: Path,
+    num_sentence_chunk_size: int = 10,
+    min_token_length: int = 30,
 ) -> UploadResult:
-    # ---- validate type (NOW supports text/* and PDFs) ----
-    filename = (file.filename or "uploaded").strip()
+
+    # ---- validate type ----
+    filename = file.filename.strip()
     content_type = file.content_type or ""
 
     is_pdf = content_type == "application/pdf" or filename.lower().endswith(".pdf")
-    is_text = content_type.startswith("text/")
-
-    if not (is_text or is_pdf):
+    if not is_pdf:
         raise HTTPException(
             status_code=400,
-            detail="Only text/* and application/pdf files supported for now",
+            detail="This ingestion path supports only PDF files",
         )
 
-    # ---- read raw bytes once ----
     raw = file.file.read()
     if not raw:
         raise HTTPException(status_code=400, detail="Empty upload")
-
-    safe_name = filename or ("uploaded.pdf" if is_pdf else "uploaded.txt")
-
-    if is_pdf:
-        text_content = _extract_text_from_pdf(raw)
-    else:
-        text_content = raw.decode("utf-8", errors="ignore").strip()
-
-    if not text_content:
-        # Common for scanned PDFs (image-only) without OCR
-        raise HTTPException(status_code=400, detail="File has no readable text")
     
     doc_uuid = str(uuid.uuid4())
-    resolved_content_type = content_type or ("application/pdf" if is_pdf else "text/plain")
+    
+    # ---- run your textbook preprocessing pipeline ----
+    try:
+        chunks_df = preprocess_textbook_pdf(
+            pdf_bytes=raw,
+            num_sentence_chunk_size=num_sentence_chunk_size,
+            min_token_length=min_token_length,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not preprocess textbook PDF: {e}",
+        )
 
-    # ---- create documents row (required for chunks FK) ----
-    db.execute(
-        text("""
-            INSERT INTO documents (id, org_id, filename, content_type, status)
-            VALUES (
-                CAST(:id AS uuid),
-                CAST(:org_id AS uuid),
-                :filename,
-                :content_type,
-                'ready'
-            )
-        """),
-        {
-            "id": doc_uuid,
-            "org_id": org_id,
-            "filename": safe_name,
-            "content_type": (content_type or ("application/pdf" if is_pdf else "text/plain")),
-        },
-    )
-
-    # ---- semantic chunk ----
-    chunks = semantic_chunk_text(
-        text_content,
-        min_chunk_size=200,
-        buffer_size=1,
-        breakpoint_threshold_type="percentile",
-        breakpoint_threshold_amount=95.0,
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-    )
+    if chunks_df.empty:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid chunks were produced from the PDF",
+        )
 
     # ---- insert chunks + build pinecone records with SAME chunk_id ----
     index = get_index()
     records: List[Dict[str, Any]] = []
 
-    for i, ch in enumerate(chunks):
+    for i, row in chunks_df.reset_index(drop=True).iterrows():
+        chunk_text = str(row["sentence_chunk"]).strip()
+        if not chunk_text:
+            continue
+
         chunk_id = str(uuid.uuid4())
-
-        meta = {
-            "org_id": org_id,
-            "document_id": doc_uuid,
-            "chunk_index": i,
-            "filename": safe_name,
-        }
-
-        db.execute(
-            text("""
-                INSERT INTO chunks (id, org_id, document_id, chunk_index, content, metadata)
-                VALUES (
-                    CAST(:id AS uuid),
-                    CAST(:org_id AS uuid),
-                    CAST(:document_id AS uuid),
-                    :chunk_index,
-                    :content,
-                    CAST(:metadata AS jsonb)
-                )
-            """),
-            {
-                "id": chunk_id,
-                "org_id": org_id,
-                "document_id": doc_uuid,
-                "chunk_index": i,
-                "content": ch,
-                "metadata": json.dumps(meta),
-            },
-        )
 
         records.append(
             {
                 "id": chunk_id,
-                "text": ch,
+                "text": chunk_text,
                 "document_id": doc_uuid,
                 "chunk_index": i,
-                "filename": safe_name,
+                "filename": filename,
+                "page_number": row["page_number"],
             }
         )
 
-    db.commit()
-    index.upsert_records(namespace=org_id, records=records)
+    if not records:
+        raise HTTPException(
+            status_code=400,
+            detail="Preprocessing ran, but no non-empty chunks were available for insertion",
+        )
+
+    for batch in batch_list(records, 10):
+        index.upsert_records(namespace=org_id, records=batch)
 
     return UploadResult(
         document_id=doc_uuid,
-        chunks_inserted=len(chunks),
-        filename=safe_name,
-        content_type=resolved_content_type,
+        filename=filename,
+        content_type="application/pdf",
     )
+
+
+def batch_list(items: list, batch_size: int) -> list[list]:
+    return [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
+
+
+
+
+
+# if __name__ == "__main__":
+#     pdf_path = Path("C:/Users/banuv/Desktop/wegnio/CUSAT/SEM 2/dip/Dip textbook 4th edition.pdf")
+
+#     with open(pdf_path, "rb") as f:
+#         upload_file = UploadFile(
+#             filename=pdf_path.name,
+#             file=f,
+#             headers={"content-type": "application/pdf"},
+#         )
+
+#         result = ingest_and_index(
+#             org_id="02ba5304-1dfc-43d2-9283-aff179138d83",
+#             file=upload_file,
+#         )
+
+#     print(result)
