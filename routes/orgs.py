@@ -5,10 +5,25 @@ from uuid import UUID
 
 from db import get_db
 from models import Organization
-from schemas.orgs import OrgCreate
-from utils.slug import slugify
+from pydantic import BaseModel
+import re
 
 router = APIRouter(prefix="/orgs", tags=["orgs"])
+
+
+
+class OrgCreate(BaseModel):
+    name: str
+    slug: str | None = None  # if not provided, derive from name
+
+
+
+def slugify(s: str) -> str:
+    s = s.strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = re.sub(r"-{2,}", "-", s).strip("-")
+    return s
+
 
 @router.get("")
 def list_orgs(db: Session = Depends(get_db)):
