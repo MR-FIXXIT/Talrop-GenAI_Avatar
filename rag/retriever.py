@@ -5,7 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List
 
+import cohere
+
 from pinecone_client import get_index
+from sentence_transformers import SentenceTransformer
+
+import os
+
+
+
+co = cohere.Client(os.environ["COHERE_API_KEY"])
 
 
 @dataclass
@@ -20,33 +29,40 @@ def retrieve_context(
     *,  
     org_id: str,
     question: str,
-    top_k: int ,
+    top_k: int = 20,  # BEFORE rerank
     min_score: float = 0.3,
+    rerank_top_k: int = 3,  # AFTER rerank
 ) -> List[RetrievedChunk]:
 
     index = get_index()
 
-    results = index.search(
-        namespace=org_id,
-        query={"inputs": {"text": question}, "top_k": top_k},
-        fields=["page_number", "filename", "text"]
+    embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+
+    query_embedding = embedding_model.encode(question, show_progress_bar=True).tolist()
+
+    result = index.query(
+        vector=query_embedding,
+        top_k=top_k,
+        include_metadata=True,
+        namespace=org_id
     )
+    print("Retrieved records from vector store")
 
-    hits = results.get("result", {}).get("hits", []) or []
-
+    matches = result["matches"]
     retrieved_chunks: List[RetrievedChunk] = []
-    for h in hits:
 
-        score = float(h.get("_score", 0.0))
+    for m in matches:
 
-        # filter every hit, not just best hit
-        if score < min_score:
-            break
+        score = float(m.get("score"))
 
-        score = h["_score"]
-        chunk_text = h.get("fields", {}).get("text", "")
-        page_number = h.get("fields", {}).get("page_number")
-        file_name = h.get("fields", {}).get("filename", "")
+        # filter
+        # if score < min_score:
+        #     continue
+
+        chunk_text = m.get("metadata").get("text")
+        page_number = m.get("metadata").get("page_number")
+        file_name = m.get("metadata").get("filename")
 
         retrieved_chunks.append(
             RetrievedChunk(
@@ -57,19 +73,37 @@ def retrieve_context(
             )
         )
 
-    return retrieved_chunks
+    if not retrieved_chunks:
+        return []
 
+    docs = [c.text for c in retrieved_chunks]
+
+    response = co.rerank(
+        query=question,
+        documents=docs,
+        top_n=rerank_top_k
+    )
+    print("Reranked chunks")
+
+    # map reranked results back
+    reranked_chunks: List[RetrievedChunk] = []
+    for r in response.results:
+        original_chunk = retrieved_chunks[r.index]  
+        reranked_chunks.append(original_chunk)
+
+    return reranked_chunks
 
 
 if __name__ == "__main__":
-    context_retrieved = retrieve_context(org_id="0e6dd009-b0ea-47b5-9083-85239f62d5ba",
-                                         top_k=5,
-                                         question="What is a fourier transform?") 
+    context_retrieved = retrieve_context(
+        org_id="82142c62-9820-4a30-95d6-2f337cc7c2e5",
+        question="What is a fourier transform?",
+    ) 
     
-    for i,c in enumerate(context_retrieved, start=1):
-        print(f"Retrieved Context {i}")
-        print(f"Score : {c.score}")
-        print(f"Page number : {c.page_number}")
-        print(f"File name : {c.file_name}")
-        print(f"Context : {c.text}")
-        print("============================")
+    # for i, c in enumerate(context_retrieved, start=1):
+    #     print(f"Retrieved Context {i}")
+    #     print(f"Score : {c.score}")
+    #     print(f"Page number : {c.page_number}")
+    #     print(f"File name : {c.file_name}")
+    #     print(f"Context : {c.text}")
+    #     print("============================")

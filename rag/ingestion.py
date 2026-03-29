@@ -8,8 +8,13 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException, UploadFile
 
 from pinecone_client import get_index
-
 from rag.textbook_chunker import preprocess_textbook_pdf
+
+# NEW: embedding model
+from sentence_transformers import SentenceTransformer
+
+# Load once (global)
+embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 @dataclass
@@ -23,12 +28,10 @@ def ingest_and_index(
     *,
     org_id: str,
     file: UploadFile,
-    # upload_dir: Path,
     num_sentence_chunk_size: int = 10,
     min_token_length: int = 30,
 ) -> UploadResult:
 
-    # ---- validate type ----
     filename = file.filename.strip()
     content_type = file.content_type or ""
 
@@ -42,10 +45,10 @@ def ingest_and_index(
     raw = file.file.read()
     if not raw:
         raise HTTPException(status_code=400, detail="Empty upload")
-    
+
     doc_uuid = str(uuid.uuid4())
-    
-    # ---- run your textbook preprocessing pipeline ----
+
+    # ---- preprocess ----
     try:
         chunks_df = preprocess_textbook_pdf(
             pdf_bytes=raw,
@@ -64,10 +67,13 @@ def ingest_and_index(
             detail="No valid chunks were produced from the PDF",
         )
 
-    # ---- insert chunks + build pinecone records with SAME chunk_id ----
     index = get_index()
-    records: List[Dict[str, Any]] = []
 
+    texts = []
+    metadatas = []
+    ids = []
+
+    # ---- prepare data ----
     for i, row in chunks_df.reset_index(drop=True).iterrows():
         chunk_text = str(row["sentence_chunk"]).strip()
         if not chunk_text:
@@ -75,25 +81,36 @@ def ingest_and_index(
 
         chunk_id = str(uuid.uuid4())
 
-        records.append(
-            {
-                "id": chunk_id,
-                "text": chunk_text,
-                "document_id": doc_uuid,
-                "chunk_index": i,
-                "filename": filename,
-                "page_number": row["page_number"],
-            }
-        )
+        texts.append(chunk_text)
+        ids.append(chunk_id)
+        metadatas.append({
+            "text": chunk_text,
+            "document_id": doc_uuid,
+            "chunk_index": i,
+            "filename": filename,
+            "page_number": row["page_number"],
+        })
 
-    if not records:
+    if not texts:
         raise HTTPException(
             status_code=400,
-            detail="Preprocessing ran, but no non-empty chunks were available for insertion",
+            detail="No valid chunks after filtering",
         )
 
-    for batch in batch_list(records, 10):
-        index.upsert_records(namespace=org_id, records=batch)
+    # ---- generate embeddings ----
+    embeddings = embedding_model.encode(texts, show_progress_bar=True)
+
+    # ---- upsert to Pinecone ----
+    vectors = []
+    for i in range(len(texts)):
+        vectors.append({
+            "id": ids[i],
+            "values": embeddings[i].tolist(),
+            "metadata": metadatas[i],
+        })
+
+    for batch in batch_list(vectors, 20):
+        index.upsert(namespace=org_id, vectors=batch)
 
     return UploadResult(
         document_id=doc_uuid,
@@ -104,24 +121,3 @@ def ingest_and_index(
 
 def batch_list(items: list, batch_size: int) -> list[list]:
     return [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
-
-
-
-
-
-# if __name__ == "__main__":
-#     pdf_path = Path("C:/Users/banuv/Desktop/wegnio/CUSAT/SEM 2/dip/Dip textbook 4th edition.pdf")
-
-#     with open(pdf_path, "rb") as f:
-#         upload_file = UploadFile(
-#             filename=pdf_path.name,
-#             file=f,
-#             headers={"content-type": "application/pdf"},
-#         )
-
-#         result = ingest_and_index(
-#             org_id="02ba5304-1dfc-43d2-9283-aff179138d83",
-#             file=upload_file,
-#         )
-
-#     print(result)
