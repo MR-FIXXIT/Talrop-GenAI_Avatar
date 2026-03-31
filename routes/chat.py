@@ -28,7 +28,7 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
     chat_history: List[ChatMsg] = Field(default_factory=list)
     evaluate: bool = False
-    top_k: int = 3
+    top_k: int = 20
 
 
 def require_scope(ctx: dict, needed: str):

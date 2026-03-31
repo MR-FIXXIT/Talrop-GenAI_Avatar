@@ -51,7 +51,7 @@ def chat_rag(
     org_system_prompt: Optional[str] = None,
     temperature: float,
     max_new_tokens: int,
-    top_k: int = 5,
+    top_k: int = 20,
     min_score: float = 0.1,
 ) -> RagResult:
     """

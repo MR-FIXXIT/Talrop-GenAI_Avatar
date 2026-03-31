@@ -36,8 +36,6 @@ def build_llm(*, temperature: float, max_new_tokens: int):
         model="qwen/qwen3-32b",
         temperature=temperature,
         max_tokens=max_new_tokens,
-        # Optional for Qwen3-32B on Groq:
-        # model_kwargs={"reasoning_effort": "none"}
     )
 
 
@@ -166,6 +164,7 @@ def generate_answer_from_facts(
             ("human", "{input}"),
         ]
     )
+    
     chain = prompt | llm | StrOutputParser()
 
     answer = chain.invoke({"input": question})

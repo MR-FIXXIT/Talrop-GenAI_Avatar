@@ -29,7 +29,7 @@ def ingest_and_index(
     org_id: str,
     file: UploadFile,
     num_sentence_chunk_size: int = 10,
-    min_token_length: int = 30,
+    min_token_length: int = 30
 ) -> UploadResult:
 
     filename = file.filename.strip()

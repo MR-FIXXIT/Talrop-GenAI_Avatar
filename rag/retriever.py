@@ -12,8 +12,6 @@ from sentence_transformers import SentenceTransformer
 
 import os
 
-
-
 co = cohere.Client(os.environ["COHERE_API_KEY"])
 
 
@@ -38,7 +36,7 @@ def retrieve_context(
 
     embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-
+    print("Embedding Query....")
     query_embedding = embedding_model.encode(question, show_progress_bar=True).tolist()
 
     result = index.query(
@@ -49,7 +47,9 @@ def retrieve_context(
     )
     print("Retrieved records from vector store")
 
+
     matches = result["matches"]
+    print(f"Length of matches : {len(matches)}")
     retrieved_chunks: List[RetrievedChunk] = []
 
     for m in matches:
@@ -97,13 +97,13 @@ def retrieve_context(
 if __name__ == "__main__":
     context_retrieved = retrieve_context(
         org_id="82142c62-9820-4a30-95d6-2f337cc7c2e5",
-        question="What is a fourier transform?",
+        question="Explain linear regression",
     ) 
     
-    # for i, c in enumerate(context_retrieved, start=1):
-    #     print(f"Retrieved Context {i}")
-    #     print(f"Score : {c.score}")
-    #     print(f"Page number : {c.page_number}")
-    #     print(f"File name : {c.file_name}")
-    #     print(f"Context : {c.text}")
-    #     print("============================")
+    for i, c in enumerate(context_retrieved, start=1):
+        print(f"Retrieved Context {i}")
+        print(f"Score : {c.score}")
+        print(f"Page number : {c.page_number}")
+        print(f"File name : {c.file_name}")
+        print(f"Context : {c.text}")
+        print("============================")
