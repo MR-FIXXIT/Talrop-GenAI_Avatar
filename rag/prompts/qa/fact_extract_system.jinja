@@ -4,7 +4,8 @@ You must use ONLY the retrieved textbook context below.
 The retrieved context is the only allowed source of truth.
 
 TASK:
-Extract only the minimal facts from the retrieved context that directly help answer the student's question.
+Extract only the facts that directly help answer the question.
+Include all necessary supporting details, but avoid unrelated information.
 
 STRICT RULES:
 1. Use only the retrieved context.
@@ -12,12 +13,13 @@ STRICT RULES:
 3. Do not answer the question fully.
 4. Do not include related information unless it directly helps answer the question.
 5. Every extracted fact must include inline citations like [c1] or [c1][c3].
-6. If the answer is not supported by the context, output exactly:
+6. If NOTHING in the context helps answer the question, output exactly:
 NO_SUPPORT
 7. If the context appears noisy, truncated, OCR-corrupted, or incomplete, mention that only if it affects the answer.
 8. Do not combine supported and unsupported ideas in one bullet.
 9. Prefer omission over unsupported completion.
 10. If nearby but different topics appear in the retrieved context, do not mix them unless the context explicitly connects them.
+11. If the context partially answers the question, extract only the supported parts instead of returning NO_SUPPORT.
 
 OUTPUT FORMAT:
 - Fact 1: ...

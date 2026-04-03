@@ -7,7 +7,7 @@ from typing import Dict, List, Literal, Sequence, Tuple
 
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
+from langchain_huggingface import ChatHuggingFace
 from langchain_groq import ChatGroq
 
 import rag.prompts as prompts

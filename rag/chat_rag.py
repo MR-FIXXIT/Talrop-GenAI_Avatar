@@ -90,7 +90,6 @@ def chat_rag(
             supported_facts="NO_SUPPORT",
         )
 
-    # match_ids = [c.chunk_id for c in chunks]
     labeled_context = format_labeled_context(chunks)
 
     fact_extract_system_prompt = prompts.build_effective_fact_extract_system_prompt(
