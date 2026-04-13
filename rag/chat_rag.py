@@ -1,10 +1,21 @@
 #rag/chat_rag.py
 from __future__ import annotations
 
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass
-from typing import List, Literal, Optional, Sequence
+from datetime import datetime
+from typing import List, Optional, Sequence
 
-from rag.retriever import retrieve_context, RetrievedChunk
+from pyinstrument import Profiler
+
+from rag.retriever import (
+    RetrievedChunk,
+    embed_query,
+    pinecone_query,
+    rerank_chunks,
+)
 
 from rag.generator import (
     HistoryItem,
@@ -12,15 +23,50 @@ from rag.generator import (
     history_to_lc,
     contextualize_question,
     extract_supported_facts,
-    generate_answer_from_facts,
-    revise_answer_for_faithfulness,
+    generate_faithful_answer,   # replaces generate_answer_from_facts + revise_answer_for_faithfulness
     normalize_final_answer,
 )
 
 import rag.prompts as prompts
 
 
-Role = Literal["user", "assistant"]
+
+# Directory where HTML profiles are saved
+_PROFILE_DIR = os.path.join(os.path.dirname(__file__), "..", "profiles")
+
+
+@dataclass
+class StepTiming:
+    name: str
+    elapsed: float  # seconds
+
+
+def _print_timing_table(timings: List[StepTiming], total: float) -> None:
+    """Print a formatted per-step timing table to stdout."""
+    col_w = 38
+    sep = "-" * (col_w + 22)
+    print("\n" + sep)
+    print(f"  {'CHAT PIPELINE TIMING':^{col_w + 18}}")
+    print(sep)
+    print(f"  {'Step':<{col_w}}  {'Time (s)':>8}  {'Share':>6}")
+    print(sep)
+    for t in timings:
+        share = (t.elapsed / total * 100) if total > 0 else 0
+        print(f"  {t.name:<{col_w}}  {t.elapsed:>8.3f}  {share:>5.1f}%")
+    print(sep)
+    print(f"  {'TOTAL':<{col_w}}  {total:>8.3f}  100.0%")
+    print(sep + "\n")
+
+
+def _save_profile(profiler: Profiler) -> str:
+    """Persist the pyinstrument HTML report and return the file path."""
+    os.makedirs(_PROFILE_DIR, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(_PROFILE_DIR, f"chat_profile_{stamp}.html")
+    html = profiler.output_html(timeline=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(html)
+    return os.path.abspath(path)
 
 _NO_CONTEXT_ANSWER = "Answer: I don't know based on the provided context."
 
@@ -50,39 +96,110 @@ def chat_rag(
     history: Sequence[HistoryItem],
     org_system_prompt: Optional[str] = None,
     temperature: float,
-    max_new_tokens: int,
     top_k: int = 20,
     min_score: float = 0.1,
 ) -> RagResult:
     """
-    Orchestrates the RAG flow:
-      1) build llm
-      2) history -> lc format
-      3) contextualize question
-      4) retrieve context
-      5) build system prompt
-      6) generate answer
-      7) return RagResult
+    Orchestrates the full RAG pipeline with per-step timing and pyinstrument profiling.
+
+    Steps:
+      1)  Build 3 LLM instances (right-sized token budgets, thinking disabled)
+      2)  Convert history to LangChain format
+      3+4) Parallel: contextualize question (LLM) ∥ embed original message
+      4b) Re-embed if question was rewritten, else reuse pre-computed embedding
+      5)  Pinecone vector query
+      6)  Local CrossEncoder rerank
+      7)  Format context + build fact-extraction prompt
+      8)  Extract supported facts (LLM)
+      9)  Generate faithful answer in one pass (LLM)
+      10) Normalize final answer
+
+    A per-step timing table is printed to stdout after every request and a
+    full pyinstrument HTML profile is saved under profiles/.
     """
-    llm = build_llm(temperature=temperature, max_new_tokens=max_new_tokens)
+    timings: List[StepTiming] = []
+    pipeline_start = time.perf_counter()
+
+    profiler = Profiler()
+    profiler.start()
+
+    # ── Step 1: Build per-step LLM instances ─────────────────────────────────
+    # Three separate clients with tight token budgets instead of one shared
+    # 3000-token instance.  thinking=False disables Qwen3's <think> chains,
+    # which were silently consuming most of the 3000-token budget before the
+    # visible answer even started (causing the 35-50 s steps 9+10).
+    #
+    #   llm_ctx     — 300 tokens   : rewrite question from history (~50 tokens out)
+    #   llm_extract — 800 tokens   : extract supported facts     (~300 tokens out)
+    #   llm_answer  — 1500 tokens  : final faithful answer       (~500-800 tokens out)
+    t0 = time.perf_counter()
+    llm_ctx     = build_llm(temperature=temperature, max_new_tokens=300,  thinking=False)
+    llm_extract = build_llm(temperature=temperature, max_new_tokens=800,  thinking=False)
+    llm_answer  = build_llm(temperature=temperature, max_new_tokens=1500, thinking=False)
+    timings.append(StepTiming("1. build_llm (3 instances, thinking=off)", time.perf_counter() - t0))
+
+    # ── Step 2: Convert history to LangChain format ────────────────────────
+    t0 = time.perf_counter()
     lc_history = history_to_lc(history)
+    timings.append(StepTiming("2. history_to_lc", time.perf_counter() - t0))
 
-    standalone_question = contextualize_question(
-        llm,
-        user_message=user_message,
-        lc_history=lc_history,
-    )
+    # ── Steps 3 & 4 (PARALLEL): contextualize question ∥ embed original msg ──
+    #
+    # contextualize_question makes an LLM call (~1-3 s when history exists).
+    # embed_query runs the local SentenceTransformer (~50-150 ms).
+    # Both are submitted at the same time; the embedding finishes first and
+    # waits cheaply while the LLM rewrites the question.
+    #
+    # After both futures resolve:
+    #   • If question unchanged  → use the pre-computed embedding (free).
+    #   • If question was rewritten → re-embed the new question (~100 ms).
+    #     The model is cached in memory so this is fast.
+    parallel_start = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future_q:   Future[str]        = pool.submit(
+            contextualize_question, llm_ctx,
+            user_message=user_message,
+            lc_history=lc_history,
+        )
+        future_emb: Future[List[float]] = pool.submit(
+            embed_query, user_message
+        )
+        # Block until both complete (LLM will almost always finish last)
+        standalone_question: str        = future_q.result()
+        orig_embedding:      List[float] = future_emb.result()
 
-    # Recommended retriever contract:
-    # returns List[RetrievedChunk]
-    chunks = retrieve_context(
-        org_id=org_id,
-        question=standalone_question,
-        top_k=top_k,
-        min_score=min_score,
-    )
+    parallel_elapsed = time.perf_counter() - parallel_start
+    timings.append(StepTiming(
+        "3+4. contextualize_question ∥ embed_query (parallel)",
+        parallel_elapsed,
+    ))
+
+    # ── Decide which embedding to use for Pinecone ────────────────────────────
+    if standalone_question.strip() == user_message.strip():
+        query_embedding = orig_embedding
+        timings.append(StepTiming("4b. re-embed (skipped — question unchanged)", 0.0))
+    else:
+        # LLM rewrote the question → re-embed the standalone version.
+        # Cost: ~100 ms (model already in memory).
+        t0 = time.perf_counter()
+        query_embedding = embed_query(standalone_question)
+        timings.append(StepTiming("4b. re-embed standalone question", time.perf_counter() - t0))
+
+    # ── Step 5: Pinecone vector query ─────────────────────────────────────────
+    t0 = time.perf_counter()
+    raw_chunks = pinecone_query(org_id, query_embedding, top_k=top_k)
+    timings.append(StepTiming("5. pinecone_query", time.perf_counter() - t0))
+
+    # ── Step 6: CrossEncoder rerank ───────────────────────────────────────────
+    t0 = time.perf_counter()
+    chunks = rerank_chunks(question=standalone_question, chunks=raw_chunks)
+    timings.append(StepTiming("6. rerank_chunks (CrossEncoder)", time.perf_counter() - t0))
 
     if not chunks:
+        profiler.stop()
+        total = time.perf_counter() - pipeline_start
+        timings.append(StepTiming("  → early exit: no chunks retrieved", 0.0))
+        _print_timing_table(timings, total)
         return RagResult(
             standalone_question=standalone_question,
             context="",
@@ -90,58 +207,66 @@ def chat_rag(
             supported_facts="NO_SUPPORT",
         )
 
+    # ── Step 7: Format context ─────────────────────────────────────────────
+    t0 = time.perf_counter()
     labeled_context = format_labeled_context(chunks)
-
     fact_extract_system_prompt = prompts.build_effective_fact_extract_system_prompt(
         org_system_prompt=org_system_prompt,
         context=labeled_context,
     )
+    timings.append(StepTiming("7. format_context + build_prompts", time.perf_counter() - t0))
 
+    # ── Step 8: Extract supported facts (LLM call) ─────────────────────────
+    t0 = time.perf_counter()
     supported_facts = extract_supported_facts(
-        llm,
+        llm_extract,
         system_prompt=fact_extract_system_prompt,
         question=standalone_question,
     )
+    timings.append(StepTiming("8. extract_supported_facts (LLM, 800 tok)", time.perf_counter() - t0))
 
-    print(f"Supported Facts : {supported_facts}")
-    
+    # print(f"Supported Facts : {supported_facts}")
+
     if not supported_facts or supported_facts.strip() == "NO_SUPPORT":
         answer = _NO_CONTEXT_ANSWER
+        timings.append(StepTiming("9. generate_faithful_answer (LLM, 1500 tok)", 0.0))
     else:
-        answer_from_facts_system_prompt = (
-            prompts.build_effective_answer_from_facts_system_prompt(
+        faithful_answer_system_prompt = (
+            prompts.build_effective_faithful_answer_system_prompt(
                 org_system_prompt=org_system_prompt,
                 context=labeled_context,
                 supported_facts=supported_facts,
             )
         )
 
-
-        draft_answer = generate_answer_from_facts(
-            llm,
-            system_prompt=answer_from_facts_system_prompt,
+        # ── Step 9: Generate faithful answer in one pass (LLM call) ─────────
+        # Replaces the old steps 9 + 10 (generate_answer_from_facts +
+        # revise_answer_for_faithfulness).  Faithfulness rules are baked
+        # into the prompt so no revision loop is needed.
+        t0 = time.perf_counter()
+        answer = generate_faithful_answer(
+            llm_answer,
+            system_prompt=faithful_answer_system_prompt,
             question=standalone_question,
         )
+        timings.append(StepTiming("9. generate_faithful_answer (LLM, 1500 tok)", time.perf_counter() - t0))
 
-        print(f"Draft Answer : {draft_answer}")
-
-        revision_system_prompt = (
-            prompts.build_effective_faithfulness_revision_system_prompt(
-                org_system_prompt=org_system_prompt,
-                context=labeled_context,
-                draft_answer=draft_answer,
-            )
-        )
-
-        answer = revise_answer_for_faithfulness(
-            llm,
-            system_prompt=revision_system_prompt,
-            question=standalone_question,
-        )
-
-        print(f"Answer : {answer}")
-
+    # ── Step 10: Normalize final answer ─────────────────────────────────────
+    t0 = time.perf_counter()
     answer = normalize_final_answer(answer)
+    timings.append(StepTiming("10. normalize_final_answer", time.perf_counter() - t0))
+
+    # ── Stop profiler & report ─────────────────────────────────────────────
+    profiler.stop()
+    total = time.perf_counter() - pipeline_start
+
+    _print_timing_table(timings, total)
+
+    try:
+        profile_path = _save_profile(profiler)
+        print(f"[pyinstrument] Full call-stack profile saved → {profile_path}\n")
+    except Exception as exc:  # never crash the request over profiling
+        print(f"[pyinstrument] Could not save profile: {exc}")
 
     return RagResult(
         standalone_question=standalone_question,

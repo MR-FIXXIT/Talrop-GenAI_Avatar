@@ -114,7 +114,6 @@ def chat(
         history=[m.model_dump() for m in payload.chat_history],
         org_system_prompt=(settings["system_prompt"] if settings else None),
         temperature=0.0,
-        max_new_tokens=3000,
         top_k=payload.top_k,
     )
 
