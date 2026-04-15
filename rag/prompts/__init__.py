@@ -29,33 +29,14 @@ def qa_fact_extract_system_prompt(*, context: str) -> str:
     return render_template("qa/fact_extract_system.jinja", vars={"context": context})
 
 
-def qa_answer_from_facts_system_prompt(*, context: str, supported_facts: str) -> str:
-    return render_template(
-        "qa/answer_from_facts_system.jinja",
-        vars={
-            "context": context,
-            "supported_facts": supported_facts,
-        },
-    )
-
-
-def qa_faithfulness_revision_system_prompt(*, context: str, draft_answer: str) -> str:
-    return render_template(
-        "qa/faithfulness_revision_system.jinja",
-        vars={
-            "context": context,
-            "draft_answer": draft_answer,
-        },
-    )
-
-
-def qa_faithful_answer_system_prompt(*, context: str, supported_facts: str) -> str:
+def qa_faithful_answer_system_prompt(*, context: str, supported_facts: str, tone: Optional[str] = None) -> str:
     """Single-pass prompt: generates a faithful answer without a separate revision step."""
     return render_template(
         "qa/faithful_answer_system.jinja",
         vars={
             "context": context,
             "supported_facts": supported_facts,
+            "tone": tone,
         },
     )
 
@@ -72,49 +53,19 @@ def build_effective_fact_extract_system_prompt(
     return (org_system + "\n\n" + base).strip()
 
 
-def build_effective_answer_from_facts_system_prompt(
-    *,
-    org_system_prompt: Optional[str],
-    context: str,
-    supported_facts: str,
-) -> str:
-    org_system = (org_system_prompt or "").strip()
-    base = qa_answer_from_facts_system_prompt(
-        context=context,
-        supported_facts=supported_facts,
-    )
-    if not org_system:
-        return base
-    return (org_system + "\n\n" + base).strip()
-
-
-def build_effective_faithfulness_revision_system_prompt(
-    *,
-    org_system_prompt: Optional[str],
-    context: str,
-    draft_answer: str,
-) -> str:
-    org_system = (org_system_prompt or "").strip()
-    base = qa_faithfulness_revision_system_prompt(
-        context=context,
-        draft_answer=draft_answer,
-    )
-    if not org_system:
-        return base
-    return (org_system + "\n\n" + base).strip()
-
-
 def build_effective_faithful_answer_system_prompt(
     *,
     org_system_prompt: Optional[str],
     context: str,
     supported_facts: str,
+    tone: Optional[str] = None,
 ) -> str:
     """Builds the system prompt for the single-pass generate+faithfulness step."""
     org_system = (org_system_prompt or "").strip()
     base = qa_faithful_answer_system_prompt(
         context=context,
         supported_facts=supported_facts,
+        tone=tone,
     )
     if not org_system:
         return base

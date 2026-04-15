@@ -99,7 +99,7 @@ def chat(
     # DB-only: settings lookup stays in route layer
     settings = db.execute(
         text("""
-            SELECT tone, system_prompt, safety_prompt, avatar_id, voice_id
+            SELECT tone, system_prompt, safety_prompt
             FROM avatar_settings
             WHERE org_id = CAST(:org_id AS uuid) AND is_active = true
             LIMIT 1
@@ -113,6 +113,7 @@ def chat(
         user_message=user_message,
         history=[m.model_dump() for m in payload.chat_history],
         org_system_prompt=(settings["system_prompt"] if settings else None),
+        tone=(settings["tone"] if settings else None),
         temperature=0.0,
         top_k=payload.top_k,
     )

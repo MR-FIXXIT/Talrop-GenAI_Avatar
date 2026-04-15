@@ -56,15 +56,6 @@ class AvatarSettings(Base):
         server_default=text("''::text"),
     )
 
-    avatar_provider: Mapped[str] = mapped_column(
-        Text,
-        nullable=False,
-        server_default=text("'heygen'::text"),
-    )
-
-    avatar_id: Mapped[str] = mapped_column(Text, nullable=False)
-    voice_id: Mapped[str] = mapped_column(Text, nullable=False)
-
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

@@ -12,7 +12,7 @@ from starlette.concurrency import run_in_threadpool
 
 from auth import require_tenant
 from db import get_db
-from rag.ingestion_old import ingest_and_index_text_file
+from rag.ingestion import ingest_and_index
 from rag.scraping import scrape_static_url, scraped_page_to_uploadfile
 
 router = APIRouter(tags=["documents"])
@@ -57,10 +57,9 @@ async def scrape_and_ingest(
 
             upload_file = await run_in_threadpool(scraped_page_to_uploadfile, page)
 
-            # Ingest using your unchanged ingestion pipeline
+            # Ingest using your unified ingestion pipeline
             ingest_result = await run_in_threadpool(
-                ingest_and_index_text_file,
-                db=db,
+                ingest_and_index,
                 org_id=org_id,
                 file=upload_file,
             )
@@ -72,7 +71,6 @@ async def scrape_and_ingest(
                     "title": page.title,
                     "status": "ok",
                     "document_id": ingest_result.document_id,
-                    "chunks_inserted": ingest_result.chunks_inserted,
                 }
             )
 

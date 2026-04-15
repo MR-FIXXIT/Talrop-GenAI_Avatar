@@ -146,7 +146,7 @@ def _fetch_html_static(url: str, *, timeout_s: float) -> tuple[str, str]:
     _validate_url_ssrf(url)
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; RAG-Scraper/1.0)",
+        "User-Agent": "Talrop-GenBot/1.0 (admin@talrop.com)",
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.8",
     }

@@ -8,9 +8,9 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException, UploadFile
 
 from pinecone_client import get_index
-from rag.textbook_chunker import preprocess_textbook_pdf
+from rag.textbook_chunker import preprocess_pdf, preprocess_text
 
-# NEW: embedding model
+# Embedding model
 from sentence_transformers import SentenceTransformer
 
 # Load once (global)
@@ -36,10 +36,12 @@ def ingest_and_index(
     content_type = file.content_type or ""
 
     is_pdf = content_type == "application/pdf" or filename.lower().endswith(".pdf")
-    if not is_pdf:
+    is_text = content_type.startswith("text/") or filename.lower().endswith(".txt")
+    
+    if not (is_pdf or is_text):
         raise HTTPException(
             status_code=400,
-            detail="This ingestion path supports only PDF files",
+            detail="Only PDF and text files are supported",
         )
 
     raw = file.file.read()
@@ -50,21 +52,30 @@ def ingest_and_index(
 
     # ---- preprocess ----
     try:
-        chunks_df = preprocess_textbook_pdf(
-            pdf_bytes=raw,
-            num_sentence_chunk_size=num_sentence_chunk_size,
-            min_token_length=min_token_length,
-        )
+        if is_pdf:
+            chunks_df = preprocess_pdf(
+                pdf_bytes=raw,
+                num_sentence_chunk_size=num_sentence_chunk_size,
+                min_token_length=min_token_length,
+            )
+        else:
+            # Assume text
+            text_str = raw.decode("utf-8", errors="ignore")
+            chunks_df = preprocess_text(
+                text=text_str,
+                num_sentence_chunk_size=num_sentence_chunk_size,
+                min_token_length=min_token_length,
+            )
     except Exception as e:
         raise HTTPException(
             status_code=400,
-            detail=f"Could not preprocess textbook PDF: {e}",
+            detail=f"Could not preprocess file: {e}",
         )
 
     if chunks_df.empty:
         raise HTTPException(
             status_code=400,
-            detail="No valid chunks were produced from the PDF",
+            detail="No valid chunks were produced from the file",
         )
 
     index = get_index()
@@ -88,7 +99,7 @@ def ingest_and_index(
             "document_id": doc_uuid,
             "chunk_index": i,
             "filename": filename,
-            "page_number": row["page_number"],
+            "page_number": int(row["page_number"]),
         })
 
     if not texts:
@@ -115,7 +126,7 @@ def ingest_and_index(
     return UploadResult(
         document_id=doc_uuid,
         filename=filename,
-        content_type="application/pdf",
+        content_type=content_type or ("application/pdf" if is_pdf else "text/plain"),
     )
 
 

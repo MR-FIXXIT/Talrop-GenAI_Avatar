@@ -1,13 +1,11 @@
 
 
-"""Textbook preprocessing and chunking pipeline for RAG.
-
-Converted from the uploaded Jupyter notebook `text_rag.ipynb`.
+"""Preprocessing and chunking pipeline for RAG.
 
 What it does:
-1. Reads text from a PDF with PyMuPDF.
-2. Cleans page text.
-3. Splits each page into sentences with spaCy's sentencizer.
+1. Reads text from a PDF with PyMuPDF or accepts raw text.
+2. Cleans text.
+3. Splits into sentences with spaCy's sentencizer.
 4. Groups sentences into fixed-size sentence chunks.
 5. Computes chunk statistics.
 6. Filters out very short chunks.
@@ -18,10 +16,6 @@ Install requirements first:
 
 If spaCy is not installed in your environment, also install it:
     python -m spacy download en_core_web_sm
-
-Note:
-This script uses `spacy.lang.en.English` with the built-in sentencizer,
-so it does not require loading a heavyweight spaCy model.
 """
 
 from __future__ import annotations
@@ -42,7 +36,7 @@ MIN_TOKEN_LENGTH = 30
 
 
 def text_formatter(text: str) -> str:
-    """Clean extracted text from a PDF page."""
+    """Clean extracted text."""
     cleaned_text = text.replace("\n", " ").strip()
     return cleaned_text
 
@@ -58,7 +52,7 @@ def open_and_read_pdf_from_bytes(pdf_bytes: bytes) -> list[dict]:
         text = text_formatter(text)
         pages_and_texts.append(
             {
-                "page_number": page_number - 1,
+                "page_number": page_number + 1,
                 "page_char_count": len(text),   
                 "page_word_count": len(text.split(" ")),
                 "page_sentence_count_raw": len(text.split(". ")),
@@ -68,8 +62,6 @@ def open_and_read_pdf_from_bytes(pdf_bytes: bytes) -> list[dict]:
         )
 
     doc.close()
-    # print(f"length pages_and_text : {len(pages_and_texts)}")
-    # print(pages_and_texts[14])
     return pages_and_texts
 
 
@@ -139,13 +131,48 @@ def filter_short_chunks(
 
 
 
-def preprocess_textbook_pdf(
+def preprocess_pdf(
     pdf_bytes: bytes, 
     num_sentence_chunk_size: int = NUM_SENTENCE_CHUNK_SIZE,
     min_token_length: int = MIN_TOKEN_LENGTH,
 ) -> pd.DataFrame:
     """Run the full preprocessing + chunking pipeline and return final chunk DataFrame."""
     pages_and_texts = open_and_read_pdf_from_bytes(pdf_bytes)
+
+    nlp = English()
+    nlp.add_pipe("sentencizer")
+
+    add_sentence_data(pages_and_texts, nlp)
+    add_sentence_chunks(pages_and_texts, num_sentence_chunk_size=num_sentence_chunk_size)
+
+    pages_and_chunks = build_chunk_records(pages_and_texts)
+    chunks_df = pd.DataFrame(pages_and_chunks)
+    filtered_chunks = filter_short_chunks(chunks_df, min_token_length=min_token_length)
+
+    print(f"length filtered_chunks: {len(filtered_chunks)}")
+
+    return pd.DataFrame(filtered_chunks)
+
+
+def preprocess_text(
+    text: str,
+    num_sentence_chunk_size: int = NUM_SENTENCE_CHUNK_SIZE,
+    min_token_length: int = MIN_TOKEN_LENGTH,
+) -> pd.DataFrame:
+    """Preprocess raw text string into chunks."""
+    text = text_formatter(text)
+    
+    # We treat the whole text as "one page" for the sake of the existing pipeline
+    pages_and_texts = [
+        {
+            "page_number": 1,
+            "page_char_count": len(text),
+            "page_word_count": len(text.split(" ")),
+            "page_sentence_count_raw": len(text.split(". ")),
+            "page_token_count": len(text) / 4,
+            "text": text,
+        }
+    ]
 
     nlp = English()
     nlp.add_pipe("sentencizer")

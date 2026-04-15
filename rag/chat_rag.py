@@ -95,6 +95,7 @@ def chat_rag(
     user_message: str,
     history: Sequence[HistoryItem],
     org_system_prompt: Optional[str] = None,
+    tone: Optional[str] = None,
     temperature: float,
     top_k: int = 20,
     min_score: float = 0.1,
@@ -234,6 +235,7 @@ def chat_rag(
         faithful_answer_system_prompt = (
             prompts.build_effective_faithful_answer_system_prompt(
                 org_system_prompt=org_system_prompt,
+                tone=tone,
                 context=labeled_context,
                 supported_facts=supported_facts,
             )
