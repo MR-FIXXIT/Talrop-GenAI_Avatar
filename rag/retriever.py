@@ -23,6 +23,7 @@ _CROSS_ENCODER   = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 @dataclass
 class RetrievedChunk:
+    chunk_id: str
     text: str
     score: float
     page_number: int
@@ -82,6 +83,7 @@ def pinecone_query(
         metadata = m.get("metadata", {})
         chunks.append(
             RetrievedChunk(
+                chunk_id=m.get("id", ""),
                 text=metadata.get("text", ""),
                 score=float(m.get("score", 0.0)),
                 page_number=metadata.get("page_number", 0),
@@ -128,7 +130,7 @@ def rerank_chunks(
     ranked = sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)
     top_chunks = [chunk for _, chunk in ranked[:rerank_top_k]]
 
-    print(f"Reranked {len(chunks)} chunks → kept top {len(top_chunks)} (local cross-encoder)")
+    print(f"Reranked {len(chunks)} chunks -> kept top {len(top_chunks)} (local cross-encoder)")
     return top_chunks
 
 

@@ -25,6 +25,10 @@ def contextualize_system_prompt() -> str:
     return render_template("contextualize/system.jinja", vars={})
 
 
+def multi_query_system_prompt() -> str:
+    return render_template("multi_query/system.jinja", vars={})
+
+
 def qa_fact_extract_system_prompt(*, context: str) -> str:
     return render_template("qa/fact_extract_system.jinja", vars={"context": context})
 

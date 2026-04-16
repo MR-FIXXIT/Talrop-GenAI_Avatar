@@ -7,15 +7,57 @@ from typing import List
 
 from dotenv import load_dotenv
 from deepeval.synthesizer import Synthesizer
+from deepeval.models.base_model import DeepEvalBaseLLM, DeepEvalBaseEmbeddingModel
+from sentence_transformers import SentenceTransformer
 
 # Ensure we can import from the main project directory
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Import from the existing scraping module safely
 from rag.scraping import scrape_static_url
+from rag.generator import build_llm
 
 load_dotenv()
 
+class GroqSynthesizerModel(DeepEvalBaseLLM):
+    def __init__(self):
+        # Using build_llm to fetch the configured Groq model (e.g. Qwen3-32b) without reasoning chains
+        self._model = build_llm(temperature=0.3, max_new_tokens=4096, thinking=False)
+
+    def load_model(self):
+        return self._model
+
+    def generate(self, prompt: str) -> str:
+        return self._model.invoke(prompt).content
+
+    async def a_generate(self, prompt: str) -> str:
+        res = await self._model.ainvoke(prompt)
+        return res.content
+
+    def get_model_name(self):
+        return "ChatGroq"
+
+class STEmbeddingModel(DeepEvalBaseEmbeddingModel):
+    def __init__(self):
+        self._model = SentenceTransformer("all-MiniLM-L6-v2")
+
+    def load_model(self):
+        return self._model
+
+    def embed_text(self, text: str) -> List[float]:
+        return self._model.encode(text).tolist()
+
+    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+        return self._model.encode(texts).tolist()
+
+    async def a_embed_text(self, text: str) -> List[float]:
+        return self.embed_text(text)
+
+    async def a_embed_texts(self, texts: List[str]) -> List[List[float]]:
+        return self.embed_texts(texts)
+
+    def get_model_name(self):
+        return "all-MiniLM-L6-v2"
 
 def scrape_to_tempfile(url: str, temp_dir: str) -> str:
     """Scrapes a URL and saves its textual content to a local temp .txt file."""
@@ -68,11 +110,13 @@ def main():
     print(f"[*] Initializing DeepEval Synthesizer...")
     print(f"[*] Attempting to generate ~{count_per_doc} questions per document.\n")
     
-    synthesizer = Synthesizer()
+    custom_model = GroqSynthesizerModel()
+    custom_embedder = STEmbeddingModel()
+    synthesizer = Synthesizer(model=custom_model, embedder=custom_embedder)
     
     goldens = synthesizer.generate_goldens_from_docs(
         document_paths=document_paths,
-        max_goldens_per_document=count_per_doc,
+        max_goldens_per_context=count_per_doc,
         include_expected_output=True,
     )
 

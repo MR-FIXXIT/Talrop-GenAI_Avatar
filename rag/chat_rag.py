@@ -22,6 +22,7 @@ from rag.generator import (
     build_llm,
     history_to_lc,
     contextualize_question,
+    generate_multi_queries,
     extract_supported_facts,
     generate_faithful_answer,   # replaces generate_answer_from_facts + revise_answer_for_faithfulness
     normalize_final_answer,
@@ -124,20 +125,16 @@ def chat_rag(
     profiler = Profiler()
     profiler.start()
 
-    # ── Step 1: Build per-step LLM instances ─────────────────────────────────
-    # Three separate clients with tight token budgets instead of one shared
-    # 3000-token instance.  thinking=False disables Qwen3's <think> chains,
-    # which were silently consuming most of the 3000-token budget before the
-    # visible answer even started (causing the 35-50 s steps 9+10).
-    #
     #   llm_ctx     — 300 tokens   : rewrite question from history (~50 tokens out)
+    #   llm_multi   — 500 tokens   : translate into 5 variations (~200 tokens out)
     #   llm_extract — 800 tokens   : extract supported facts     (~300 tokens out)
     #   llm_answer  — 1500 tokens  : final faithful answer       (~500-800 tokens out)
     t0 = time.perf_counter()
     llm_ctx     = build_llm(temperature=temperature, max_new_tokens=300,  thinking=False)
+    llm_multi   = build_llm(temperature=temperature, max_new_tokens=500,  thinking=False)
     llm_extract = build_llm(temperature=temperature, max_new_tokens=800,  thinking=False)
     llm_answer  = build_llm(temperature=temperature, max_new_tokens=1500, thinking=False)
-    timings.append(StepTiming("1. build_llm (3 instances, thinking=off)", time.perf_counter() - t0))
+    timings.append(StepTiming("1. build_llm (4 instances, thinking=off)", time.perf_counter() - t0))
 
     # ── Step 2: Convert history to LangChain format ────────────────────────
     t0 = time.perf_counter()
@@ -175,24 +172,47 @@ def chat_rag(
         parallel_elapsed,
     ))
 
-    # ── Decide which embedding to use for Pinecone ────────────────────────────
-    if standalone_question.strip() == user_message.strip():
-        query_embedding = orig_embedding
-        timings.append(StepTiming("4b. re-embed (skipped — question unchanged)", 0.0))
-    else:
-        # LLM rewrote the question → re-embed the standalone version.
-        # Cost: ~100 ms (model already in memory).
-        t0 = time.perf_counter()
-        query_embedding = embed_query(standalone_question)
-        timings.append(StepTiming("4b. re-embed standalone question", time.perf_counter() - t0))
-
-    # ── Step 5: Pinecone vector query ─────────────────────────────────────────
+    # ── Step 4.5: Generate multiple queries (Multi-Query Translation) ──────────
     t0 = time.perf_counter()
-    raw_chunks = pinecone_query(org_id, query_embedding, top_k=top_k)
-    timings.append(StepTiming("5. pinecone_query", time.perf_counter() - t0))
+    multi_queries = generate_multi_queries(llm_multi, question=standalone_question)
+    timings.append(StepTiming(f"4.5 generate_multi_queries ({len(multi_queries)} queries)", time.perf_counter() - t0))
+
+    # ── Step 5: Parallel Pinecone retrieval for all queries ───────────────────
+    # We retrieve top_k for EACH variation, then deduplicate by chunk_id.
+    t0 = time.perf_counter()
+    all_raw_chunks: List[RetrievedChunk] = []
+    
+    with ThreadPoolExecutor(max_workers=min(5, len(multi_queries))) as pool:
+        # 1. Embed all variations
+        print(f"Embedding {len(multi_queries)} queries...")
+        embeddings = list(pool.map(embed_query, multi_queries))
+        
+        # 2. Query Pinecone for each variation
+        print(f"Querying Pinecone for {len(multi_queries)} variations...")
+        future_results = [
+            pool.submit(pinecone_query, org_id, emb, top_k=top_k) 
+            for emb in embeddings
+        ]
+        
+        for f in future_results:
+            all_raw_chunks.extend(f.result())
+
+    # ── Step 5.5: Deduplicate by chunk_id ────────────────────────────────────
+    unique_chunks_dict = {c.chunk_id: c for c in all_raw_chunks if c.chunk_id}
+    raw_chunks = list(unique_chunks_dict.values())
+    
+    # If Pinecone didn't return IDs (e.g. empty), fallback to all
+    if not unique_chunks_dict:
+        raw_chunks = all_raw_chunks
+
+    timings.append(StepTiming(
+        f"5. multi-query retrieval ({len(all_raw_chunks)} raw -> {len(raw_chunks)} unique)", 
+        time.perf_counter() - t0
+    ))
 
     # ── Step 6: CrossEncoder rerank ───────────────────────────────────────────
     t0 = time.perf_counter()
+    # We rerank the unique set against the ORIGINAL standalone question
     chunks = rerank_chunks(question=standalone_question, chunks=raw_chunks)
     timings.append(StepTiming("6. rerank_chunks (CrossEncoder)", time.perf_counter() - t0))
 

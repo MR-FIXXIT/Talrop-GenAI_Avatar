@@ -110,6 +110,42 @@ def contextualize_question(
     return q.strip() or user_message.strip()
 
 
+def generate_multi_queries(
+    llm: ChatGroq,
+    *,
+    question: str,
+) -> List[str]:
+    """
+    Generate multiple versions of the user question to improve retrieval.
+
+    Args:
+        llm:      The LLM used for query translation.
+        question: The standalone question to be expanded.
+
+    Returns:
+        List[str]: A list of versioned questions.
+    """
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", prompts.multi_query_system_prompt()),
+            ("human", "{input}"),
+        ]
+    )
+    chain = prompt | llm | StrOutputParser()
+
+    response = chain.invoke({"input": question})
+    response = strip_think(response or "").strip()
+
+    # Split by newline and filter out empty strings
+    queries = [q.strip() for q in response.split("\n") if q.strip()]
+
+    # Always include the original question if it's not in the list
+    if question.strip() not in queries:
+        queries.insert(0, question.strip())
+
+    return queries
+
+
 def extract_supported_facts(
     llm: ChatGroq,
     *,

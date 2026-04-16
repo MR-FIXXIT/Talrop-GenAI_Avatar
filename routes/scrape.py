@@ -14,6 +14,7 @@ from auth import require_tenant
 from db import get_db
 from rag.ingestion import ingest_and_index
 from rag.scraping import scrape_static_url, scraped_page_to_uploadfile
+from rag.youtube_ingestion import ingest_youtube_video_and_index
 
 router = APIRouter(tags=["documents"])
 
@@ -31,6 +32,12 @@ class ScrapeRequest(BaseModel):
     urls: List[HttpUrl] = Field(..., min_length=1, max_length=MAX_URLS_PER_REQUEST)
     # Optional: override static-only threshold
     min_text_chars: Optional[int] = Field(default=None, ge=100, le=20000)
+
+
+class YouTubeRequest(BaseModel):
+    url: HttpUrl
+    num_sentence_chunk_size: Optional[int] = Field(default=10, ge=1, le=50)
+    min_token_length: Optional[int] = Field(default=30, ge=10, le=500)
 
 
 @router.post("/scrape")
@@ -95,3 +102,33 @@ async def scrape_and_ingest(
             await asyncio.sleep(DELAY_BETWEEN_URLS_S)
 
     return {"results": results}
+
+
+@router.post("/youtube")
+async def youtube_ingest(
+    payload: YouTubeRequest,
+    ctx=Depends(require_tenant),
+    db: Session = Depends(get_db),
+):
+    require_scope(ctx, "upload")
+    org_id = str(ctx["org_id"])
+    url_str = str(payload.url)
+
+    try:
+        # Re-using the threadpool pattern for blocking ingestion
+        result = await run_in_threadpool(
+            ingest_youtube_video_and_index,
+            org_id=org_id,
+            url=url_str,
+            num_sentence_chunk_size=payload.num_sentence_chunk_size,
+            min_token_length=payload.min_token_length
+        )
+
+        return {
+            "status": "ok",
+            "document_id": result.document_id,
+            "video_title": result.video_title,
+            "url": result.url
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
